@@ -25,6 +25,7 @@ export const SEL_KEYS = {
   KeyE: 'agent-edit',
   KeyR: 'review-comment',
   KeyT: 'thread',
+  KeyK: 'bridge',
   KeyM: 'copy-markdown',
   KeyS: 'copy-source',
 };
@@ -38,6 +39,10 @@ export function setAgentHandler(fn) { agentHandler = fn; }
 /* Threads (thread.js) hook in the same way. */
 let threadHandler = null;
 export function setThreadHandler(fn) { threadHandler = fn; }
+
+/* The -bridge chat pane (bridge.js) hooks in the same way. */
+let bridgeHandler = null;
+export function setBridgeHandler(fn) { bridgeHandler = fn; }
 
 /* Same one-way registration for PR review comments (pr.js), active only in a
    `px0 pr ...` session. */
@@ -324,6 +329,14 @@ export function runSelectionAction(act, triggerBtn = null, override = null) {
         return true;
       }
     }
+    if (act === 'bridge') {
+      const d = doc_();
+      if (d && bridgeHandler) {
+        const line = d.cur || 1;
+        bridgeHandler({ text: (d.lines && d.lines[line - 1]) || '', l1: line, l2: line, path: d.path });
+        return true;
+      }
+    }
     if (act === 'agent-edit') {
       const d = doc_();
       if (d && agentHandler) {
@@ -375,6 +388,9 @@ export function runSelectionAction(act, triggerBtn = null, override = null) {
   } else if (act === 'thread') {
     if (!threadHandler) return false;
     threadHandler(target);
+  } else if (act === 'bridge') {
+    if (!bridgeHandler) return false;
+    bridgeHandler(target);
   } else if (act === 'review-comment') {
     if (!reviewHandler) return false;
     reviewHandler(target);

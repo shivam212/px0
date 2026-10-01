@@ -2848,3 +2848,14 @@ body.hide-git-gutter .g-git, body.hide-git-gutter [class*="git-"] { display: non
 .thr-scope button.active { color: var(--accent-fg); border-color: var(--accent); background: var(--bg2); }
 .thr-scope button:disabled { opacity: .4; cursor: default; }
 .thr-compose { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); }
+
+/* Claude bridge pane (web/src/bridge.js): reuses the thread transcript styles. */
+.br-item { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.br-item:last-child { border-bottom: 0; }
+.br-loc { align-self: flex-start; }
+.br-waiting { font-style: italic; text-transform: none; letter-spacing: 0; }
+.br-anchor-ref { cursor: pointer; }
+.br-anchor-ref:hover { color: var(--accent); text-decoration: underline; }
+#br-anchor { display: flex; align-items: center; gap: 6px; padding: 0; }
+#br-anchor[hidden] { display: none; }
+#br-channel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

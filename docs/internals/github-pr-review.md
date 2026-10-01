@@ -143,6 +143,9 @@ Users can delegate all drafted PR comments directly to an AI coding agent (Claud
 - Calls `provider.SubmitReview` which constructs a single review payload containing the head commit SHA, all drafted comments, and the review body/event (`APPROVE`, `REQUEST_CHANGES`, `COMMENT`).
 - Clears in-memory drafts upon successful submission.
 
+### Local-First Comments Under `-bridge`
+With a bridge (`bridge.go`), the composer's main button posts to `POST /api/bridge/send` instead of `/api/pr/comments`. That handler appends one line to the channel's `inbox.jsonl` and fills in `repo`/`pr`/`commit` from the `prSession` it already holds. It never calls the `GitProvider` (`TestBridgeCommentsNeverCallGitHub` checks this with a provider that fails the test on any call). `GET /api/bridge` returns the sent messages, each with the `outbox.jsonl` replies whose `reply_to` names it (`threadBridgeReplies`), plus `loose` replies that match no message. The outbox tailer polls the file offset every 400 ms. It holds back an unterminated last line and starts over if the file shrinks. `pr.js` relabels the review, issue-comment and reply buttons "on GitHub" and asks for confirmation before `/api/pr/submit`. Without `-bridge`, `s.bridge` is nil, `/api/bridge*` return 404, and the PR UI is unchanged.
+
 ---
 
 ## 7. Committing and Pushing Back to the PR

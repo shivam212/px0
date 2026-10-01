@@ -56,6 +56,7 @@ type Server struct {
 	agent     *agentManager     // nil unless main wires editing for this session
 	threads   *threadManager    // nil unless editing is wired: threads run on the same harness
 	pr        *prSession        // nil unless main launched this process as `px0 pr ...`
+	bridge    *bridge           // nil unless main was started with -bridge (bridge.go)
 	diffBase  string            // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
 	prHeadSHA string            // PR mode only: the checked-out PR head commit. Frozen boundary between
 	// the PR's own diff (diffBase..prHeadSHA) and the reviewer's local edits
@@ -179,6 +180,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/pr/existing-comments"), s.handlePRExistingComments)
 	s.mux.HandleFunc(s.routePath("/api/pr/comments/issue"), s.handlePRIssueCommentPost)
 	s.mux.HandleFunc(s.routePath("/api/pr/comments/review-reply"), s.handlePRReviewCommentReply)
+	s.mux.HandleFunc(s.routePath("/api/bridge"), s.handleBridge)
+	s.mux.HandleFunc(s.routePath("/api/bridge/send"), s.handleBridgeSend)
 	s.mux.HandleFunc(s.routePath("/api/session"), s.handleSession)
 }
 
@@ -659,6 +662,9 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			"files":           s.ix.PRFiles(),
 		}
 		p.mu.Unlock()
+	}
+	if b := s.bridge; b != nil {
+		meta["bridge"] = map[string]any{"channel": b.channel, "inbox": b.inbox, "outbox": b.outbox}
 	}
 	writeJSON(w, meta)
 }

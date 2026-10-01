@@ -390,6 +390,7 @@
     <header class="inspector-head">
       <div class="inspector-tabs">
         <button class="inspector-tab" data-itab="threads" id="tab-threads" title="Long-running conversations with a coding harness ({Alt+T} on a selection)" hidden>Threads<span class="thr-tab-count" hidden></span><span class="thr-tab-dot" hidden></span></button>
+        <button class="inspector-tab" data-itab="bridge" id="tab-bridge" title="Messages to and from the Claude Code session on this -bridge channel ({Alt+K} on a selection)" hidden>Claude<span class="thr-tab-count" id="br-tab-count" hidden></span></button>
         <button class="inspector-tab active" data-itab="refs" title="View references across workspace">References</button>
         <button class="inspector-tab" data-itab="symbols" title="View file symbols outline">Symbols</button>
         <button class="inspector-tab" data-itab="calls" title="Trace callers and callees ({Alt+Shift+H})">Calls</button>
@@ -516,6 +517,23 @@
             <button id="thr-stop" class="agent-cancel" title="Stop this reply" hidden>Stop</button>
             <button id="thr-send" class="agent-send" title="Send message">Send</button>
           </div>
+        </div>
+      </div>
+    </section>
+    <!-- Right Pane 6: Claude bridge (-bridge only). Comments and chat sent to an
+         already running Claude Code session through files, with its replies
+         threaded under them. Nothing here reaches GitHub. web/src/bridge.js owns it. -->
+    <section class="inspector-pane" id="pane-right-bridge">
+      <div class="inspector-bar">
+        <span class="inspector-sym-title" id="br-channel"></span>
+      </div>
+      <div id="br-msgs" class="thr-msgs"></div>
+      <div class="thr-compose">
+        <div id="br-anchor" class="thr-anchor" hidden></div>
+        <textarea id="br-input" class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Message your Claude Code session (local only, never posted to GitHub)..."></textarea>
+        <div class="agent-foot">
+          <span class="agent-hint">Enter to send, Shift+Enter for a new line</span>
+          <button id="br-send" class="agent-send" title="Send to the Claude Code session">Send to Claude</button>
         </div>
       </div>
     </section>
