@@ -73,7 +73,7 @@ export function paint() {
   let html = '';
   const gut = d.gutter || null;
   const agentRanges = (S.agentTargets || []).filter(t => t.path === d.path);
-  const bridgeDrafts = (S.bridgeDrafts || []).filter(t => t.path === d.path && t.side !== 'LEFT'); // bridge.js
+  const bridgeLines = (S.bridgeLines || {})[d.path]; // bridge.js: line -> "pending" | "asked" | "answered"
   for (let i = first; i < last; i++) {
     const n = i + 1;
     const body = d.lines[i];
@@ -81,14 +81,15 @@ export function paint() {
     if (n === d.cur) rc += ' cur';
     if (agentRanges.some(r => n >= r.l1 && n <= r.l2)) rc += ' agent-sel';
     if (agentRanges.some(r => n === r.l1)) rc += ' agent-anchor';
-    if (bridgeDrafts.some(r => n >= r.line && n <= (r.end_line || r.line))) rc += ' br-draft';
     if (gut) {
       const m = gut.marks.get(n);
       if (m) gc += m === 'add' ? ' gut-add' : ' gut-mod';
       if (gut.dels.has(n)) rc += ' gut-del';
     }
     html += '<div class="' + rc + '" data-l="' + n + '">' +
-      '<div class="' + gc + '"><span class="line-btn" role="button" data-l="' + n + '" title="Thread and line actions">Edit</span>' + n + '</div><div class="c">' + (body === undefined ? '' : body) + '</div></div>';
+      '<div class="' + gc + '"><span class="line-btn" role="button" data-l="' + n + '" title="Thread and line actions">Edit</span>' +
+      (bridgeLines && bridgeLines[n] ? '<span class="br-dot br-dot-' + bridgeLines[n] + '" role="button" data-l="' + n + '" title="Comments for Claude on this line"></span>' : '') +
+      n + '</div><div class="c">' + (body === undefined ? '' : body) + '</div></div>';
   }
   const sel = saveSelection();
   rowsEl.style.transform = 'translateY(' + (first * LH) + 'px)';

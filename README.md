@@ -77,12 +77,12 @@ px0 -bridge review https://github.com/owner/repo/pull/123
 `-bridge <name>` (or `-bridge auto`, named after the repo or PR) connects
 px0 to an already running Claude Code session through
 `~/.px0/bridge/<name>/inbox.jsonl` and `outbox.jsonl`. px0 prints both paths
-and an instruction to paste into the session. After that, comments
-(`Alt+K`, or **Send to Claude** in a PR review) and messages from the
-**Claude** pane go to that session (comments collect as drafts and go as one
-batch, or one at a time with Send Now), and its replies appear under them. Nothing
-sent this way is posted to GitHub. Posting to GitHub is a separate button
-labelled "on GitHub". See [Claude Session Bridge](docs/features/claude-bridge.md).
+and an instruction to paste into the session. After that, a comment
+(`Alt+R` on any line) waits as Pending under its line, **Ask Claude** sends
+all pending comments to that session as one batch, and Claude's replies
+appear under each comment, where **Reply…** continues the thread. Chat lives
+in the bottom Comments panel. Nothing sent this way is posted to GitHub; the
+GitHub review actions sit behind **GitHub ▾**. See [Claude Session Bridge](docs/features/claude-bridge.md).
 
 When px0 binds to `0.0.0.0`, it prints a `network` URL for every unique
 non-loopback IPv4 address on the machine, using the port selected by the

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,21 +31,17 @@ import (
 // Nothing here talks to a forge: a message sent over the bridge stays on this
 // machine. The files are px0 state like settings.json, never inside a workspace.
 
+// bridgeMsg is one inbox line. Kind "review" carries code comments (one or
+// many, with Text as an optional overall note); kind "chat" is free text.
 type bridgeMsg struct {
-	ID      string `json:"id"`
-	TS      string `json:"ts"`
-	Kind    string `json:"kind"` // "comment" (anchored to code), "chat", or "review" (a batch of comments)
-	Text    string `json:"text"`
-	Repo    string `json:"repo,omitempty"`
-	PR      int    `json:"pr,omitempty"`
-	Path    string `json:"path,omitempty"`
-	Line    int    `json:"line,omitempty"`
-	EndLine int    `json:"end_line,omitempty"`
-	Side    string `json:"side,omitempty"` // PR diffs: "RIGHT" (new code) or "LEFT" (base)
-	Commit  string `json:"commit,omitempty"`
-	Snippet string `json:"snippet,omitempty"`
-
-	Comments []bridgeComment `json:"comments,omitempty"` // kind "review" only
+	ID       string          `json:"id"`
+	TS       string          `json:"ts"`
+	Kind     string          `json:"kind"`
+	Text     string          `json:"text"`
+	Repo     string          `json:"repo,omitempty"`
+	PR       int             `json:"pr,omitempty"`
+	Commit   string          `json:"commit,omitempty"`
+	Comments []bridgeComment `json:"comments,omitempty"`
 }
 
 // bridgeComment is one code comment: a draft waiting in the session file, or
@@ -58,6 +55,9 @@ type bridgeComment struct {
 	Side    string `json:"side,omitempty"`
 	Text    string `json:"text"`
 	Snippet string `json:"snippet,omitempty"`
+	// InReplyTo is set on a follow-up typed under an earlier comment: the id of
+	// the comment it follows up on, so it lands in that thread.
+	InReplyTo string `json:"in_reply_to,omitempty"`
 }
 
 type bridgeReply struct {
@@ -157,10 +157,18 @@ func (b *bridge) loadInbox() {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	for sc.Scan() {
-		var m bridgeMsg
-		if json.Unmarshal(sc.Bytes(), &m) == nil && m.ID != "" {
-			b.sent = append(b.sent, m)
+		var msg bridgeMsg
+		if json.Unmarshal(sc.Bytes(), &msg) != nil || msg.ID == "" {
+			continue
 		}
+		if msg.Kind == "comment" {
+			// Earlier builds wrote one comment per line with the anchor at the
+			// top level; read it as a one-comment review.
+			var c bridgeComment
+			json.Unmarshal(sc.Bytes(), &c)
+			msg.Kind, msg.Text, msg.Comments = "review", "", []bridgeComment{c}
+		}
+		b.sent = append(b.sent, msg)
 	}
 	b.sent = capTail(b.sent)
 }
@@ -188,7 +196,7 @@ func (b *bridge) Send(m bridgeMsg) (bridgeMsg, error) {
 		prefix = "rv-"
 	}
 	m.ID = bridgeID(prefix)
-	m.TS = time.Now().UTC().Format(time.RFC3339)
+	m.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	line, err := json.Marshal(m)
 	if err != nil {
 		return m, err
@@ -264,7 +272,7 @@ func (b *bridge) poll() {
 			r.ID = fmt.Sprintf("r-%d", lineStart)
 		}
 		if r.TS == "" {
-			r.TS = time.Now().UTC().Format(time.RFC3339)
+			r.TS = time.Now().UTC().Format(time.RFC3339Nano)
 		}
 		b.replies = append(b.replies, r)
 	}
@@ -308,9 +316,13 @@ func (b *bridge) snapshot() ([]bridgeMsg, []bridgeReply) {
 // listening on this channel.
 func (b *bridge) Instruction() string {
 	return fmt.Sprintf("Use the Monitor tool to watch `tail -n0 -F %s` (keep it running). "+
-		"Each line is a JSON message I wrote in px0: kind \"comment\" is anchored to path/line/side at commit, with a code snippet; kind \"chat\" is free-form. "+
-		"Answer each one by appending exactly one JSON line {\"reply_to\":\"<the message id>\",\"text\":\"<markdown>\"} to %s "+
-		"(for example: jq -nc --arg r '<id>' --arg t '<reply>' '{reply_to:$r,text:$t}' >> %s). "+
+		"Each line is one JSON message I wrote in px0. "+
+		"kind \"review\": my code comments in comments[], each with id, path, line, end_line, side, text and a numbered snippet; text is an optional overall note; "+
+		"a comment with in_reply_to is a follow-up in the thread of that earlier comment id. "+
+		"kind \"chat\": a free-form message in text. "+
+		"Reply by appending one JSON line per answer to %s: {\"reply_to\":\"<comment id>\",\"text\":\"<markdown>\"} for each comment (shown under that comment), "+
+		"and reply_to the review or chat id only for an overall answer. "+
+		"For example: jq -nc --arg r '<id>' --arg t '<reply>' '{reply_to:$r,text:$t}' >> %s. "+
 		"Do not post anything to GitHub unless I ask.", b.inbox, b.outbox, b.outbox)
 }
 
@@ -326,112 +338,243 @@ func (s *Server) bridgeOrFail(w http.ResponseWriter) bool {
 	return true
 }
 
-// handleBridge returns everything sent on the channel, each message carrying
-// the outbox replies whose reply_to names it.
+// handleBridge returns the channel as the UI draws it: comment threads
+// (inline under their line), the conversation (chat, overall notes, and
+// replies to a whole review or chat), and the pending comments.
 func (s *Server) handleBridge(w http.ResponseWriter, r *http.Request) {
 	if !s.bridgeOrFail(w) {
 		return
 	}
-	threads, loose := threadBridgeReplies(s.bridge.snapshot())
+	sent, replies := s.bridge.snapshot()
+	threads, conv := bridgeView(sent, replies)
+	moved := s.session.Get().BridgeGitHub
+	if p := s.pr; p != nil && len(moved) > 0 {
+		p.mu.Lock()
+		live := make(map[int64]bool, len(p.comments))
+		for _, c := range p.comments {
+			live[c.ID] = true
+		}
+		p.mu.Unlock()
+		for i := range threads {
+			threads[i].GitHub = live[moved[threads[i].ID]]
+		}
+	}
 	writeJSON(w, map[string]any{
-		"channel":  s.bridge.channel,
-		"inbox":    s.bridge.inbox,
-		"outbox":   s.bridge.outbox,
-		"messages": threads,
-		"loose":    loose,
-		"drafts":   s.bridgeDrafts(),
+		"channel":      s.bridge.channel,
+		"inbox":        s.bridge.inbox,
+		"outbox":       s.bridge.outbox,
+		"threads":      threads,
+		"conversation": conv,
+		"pending":      s.bridgeDrafts(),
 	})
 }
 
-type bridgeThread struct {
-	bridgeMsg
-	Replies        []bridgeReply            `json:"replies"`         // reply_to = this message's id
-	CommentReplies map[string][]bridgeReply `json:"comment_replies"` // review only: reply_to = one comment's id
+// bridgeItem is one message in a thread or the conversation.
+type bridgeItem struct {
+	Who   string `json:"who"` // "you" or "claude"
+	ID    string `json:"id"`
+	TS    string `json:"ts"`
+	Text  string `json:"text"`
+	Kind  string `json:"kind,omitempty"`  // conversation only: "chat", "note" (a review's overall note) or "reply"
+	Count int    `json:"count,omitempty"` // "note": how many comments the review carried
+
+	at time.Time // ordering key; a reply never sorts before what it answers
 }
 
-// threadBridgeReplies puts each reply under what its reply_to names: a whole
-// message (comment, chat, or review), or one comment inside a review.
-// Replies with no reply_to, or one naming nothing on this channel, come back
-// separately as loose, in arrival order.
-func threadBridgeReplies(sent []bridgeMsg, replies []bridgeReply) ([]bridgeThread, []bridgeReply) {
-	type ref struct {
-		msg     int
-		comment string // "" for the message itself
-	}
-	threads := make([]bridgeThread, len(sent))
-	byID := make(map[string]ref, len(sent))
-	for i, m := range sent {
-		threads[i] = bridgeThread{bridgeMsg: m, Replies: []bridgeReply{}, CommentReplies: map[string][]bridgeReply{}}
-		byID[m.ID] = ref{msg: i}
-		for _, c := range m.Comments {
-			byID[c.ID] = ref{msg: i, comment: c.ID}
+func bridgeTime(ts string) time.Time { t, _ := time.Parse(time.RFC3339Nano, ts); return t }
+
+// bridgeThreadView is one code comment with its follow-ups and Claude's
+// replies, in order. ID is the first comment's id.
+type bridgeThreadView struct {
+	bridgeComment
+	Items  []bridgeItem `json:"items"`
+	GitHub bool         `json:"github,omitempty"` // also added as a GitHub review draft
+}
+
+// bridgeView threads the channel. A comment starts a thread unless its
+// in_reply_to names a comment already in one. A reply goes to the thread
+// holding the comment its reply_to names; a reply to a review or chat id, or
+// to nothing known, goes to the conversation.
+func bridgeView(sent []bridgeMsg, replies []bridgeReply) ([]bridgeThreadView, []bridgeItem) {
+	threads := []bridgeThreadView{}
+	conv := []bridgeItem{}
+	threadOf := map[string]int{}
+	sentAt := map[string]time.Time{} // every message and comment id -> when it was sent
+	for _, m := range sent {
+		at := bridgeTime(m.TS)
+		sentAt[m.ID] = at
+		switch m.Kind {
+		case "chat":
+			conv = append(conv, bridgeItem{Who: "you", ID: m.ID, TS: m.TS, Text: m.Text, Kind: "chat", at: at})
+		case "review":
+			for _, c := range m.Comments {
+				t, ok := threadOf[c.InReplyTo]
+				if c.InReplyTo == "" || !ok {
+					root := c
+					root.InReplyTo = ""
+					threads = append(threads, bridgeThreadView{bridgeComment: root, Items: []bridgeItem{}})
+					t = len(threads) - 1
+				}
+				threads[t].Items = append(threads[t].Items, bridgeItem{Who: "you", ID: c.ID, TS: m.TS, Text: c.Text, at: at})
+				threadOf[c.ID] = t
+				sentAt[c.ID] = at
+			}
+			if m.Text != "" {
+				conv = append(conv, bridgeItem{Who: "you", ID: m.ID, TS: m.TS, Text: m.Text, Kind: "note", Count: len(m.Comments), at: at})
+			}
 		}
 	}
-	loose := []bridgeReply{}
 	for _, r := range replies {
-		at, ok := byID[r.ReplyTo]
-		switch {
-		case !ok:
-			loose = append(loose, r)
-		case at.comment == "":
-			threads[at.msg].Replies = append(threads[at.msg].Replies, r)
-		default:
-			t := &threads[at.msg]
-			t.CommentReplies[at.comment] = append(t.CommentReplies[at.comment], r)
+		item := bridgeItem{Who: "claude", ID: r.ID, TS: r.TS, Text: r.Text, at: bridgeTime(r.TS)}
+		if q, ok := sentAt[r.ReplyTo]; ok && item.at.Before(q) {
+			item.at = q // a skewed clock on the writer's side
 		}
+		if t, ok := threadOf[r.ReplyTo]; ok {
+			threads[t].Items = append(threads[t].Items, item)
+			continue
+		}
+		item.Kind = "reply"
+		conv = append(conv, item)
 	}
-	return threads, loose
+	for i := range threads {
+		sortBridgeItems(threads[i].Items)
+	}
+	sortBridgeItems(conv)
+	return threads, conv
 }
 
-// handleBridgeSend appends one comment or chat message to the inbox. The
-// server fills in where it is from (repo, PR, commit) and the code around it.
-func (s *Server) handleBridgeSend(w http.ResponseWriter, r *http.Request) {
-	if !s.bridgeOrFail(w) {
-		return
-	}
-	if !localPost(w, r) {
-		return
-	}
-	var body struct {
-		Kind    string `json:"kind"`
-		Text    string `json:"text"`
-		Path    string `json:"path"`
-		Line    int    `json:"line"`
-		EndLine int    `json:"endLine"`
-		Side    string `json:"side"`
-		Snippet string `json:"snippet"` // what the client saw, used when the server can't read it (base side of a diff)
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<17)).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" {
-		fail(w, http.StatusBadRequest, "text is required")
-		return
-	}
-	m := bridgeMsg{Kind: body.Kind, Text: strings.TrimSpace(body.Text)}
-	if m.Kind == "" {
-		m.Kind = "chat"
-		if body.Path != "" {
-			m.Kind = "comment"
+// sortBridgeItems orders by time, keeping arrival order on a tie. px0 writes
+// nanosecond times, so its own lines and the replies it stamps never tie.
+func sortBridgeItems(items []bridgeItem) {
+	sort.SliceStable(items, func(i, j int) bool { return items[i].at.Before(items[j].at) })
+}
+
+func bridgeFindComment(sent []bridgeMsg, id string) (bridgeComment, bool) {
+	for _, m := range sent {
+		for _, c := range m.Comments {
+			if c.ID == id {
+				return c, true
+			}
 		}
 	}
-	switch m.Kind {
-	case "chat":
-	case "comment":
-		c, ok := s.bridgeAnchor(body.Path, body.Line, body.EndLine, body.Side, body.Snippet)
-		if !ok {
-			fail(w, http.StatusBadRequest, "a comment needs a path and line")
-			return
-		}
-		m.Path, m.Line, m.EndLine, m.Side, m.Snippet = c.Path, c.Line, c.EndLine, c.Side, c.Snippet
-	default:
-		fail(w, http.StatusBadRequest, `kind must be "comment" or "chat"`)
-		return
+	return bridgeComment{}, false
+}
+
+func decodeBridgeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<17)).Decode(v); err != nil {
+		fail(w, http.StatusBadRequest, "invalid JSON")
+		return false
 	}
+	return true
+}
+
+func (s *Server) sendBridge(w http.ResponseWriter, m bridgeMsg) (bridgeMsg, bool) {
 	s.bridgeOrigin(&m)
 	sent, err := s.bridge.Send(m)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
+		return sent, false
+	}
+	return sent, true
+}
+
+// handleBridgeChat sends one free-form message from the Comments panel.
+func (s *Server) handleBridgeChat(w http.ResponseWriter, r *http.Request) {
+	if !s.bridgeOrFail(w) || !localPost(w, r) {
 		return
 	}
-	writeJSON(w, sent)
+	var body struct {
+		Text string `json:"text"`
+	}
+	if !decodeBridgeBody(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.Text) == "" {
+		fail(w, http.StatusBadRequest, "text is required")
+		return
+	}
+	if sent, ok := s.sendBridge(w, bridgeMsg{Kind: "chat", Text: strings.TrimSpace(body.Text)}); ok {
+		writeJSON(w, sent)
+	}
+}
+
+// handleBridgeReply sends a follow-up typed under a comment thread right
+// away, as a one-comment review whose in_reply_to names that comment.
+func (s *Server) handleBridgeReply(w http.ResponseWriter, r *http.Request) {
+	if !s.bridgeOrFail(w) || !localPost(w, r) {
+		return
+	}
+	var body struct {
+		ID   string `json:"id"`
+		Text string `json:"text"`
+	}
+	if !decodeBridgeBody(w, r, &body) {
+		return
+	}
+	text := strings.TrimSpace(body.Text)
+	sent, _ := s.bridge.snapshot()
+	prev, ok := bridgeFindComment(sent, body.ID)
+	if !ok || text == "" {
+		fail(w, http.StatusBadRequest, "a reply needs text and the id of a comment already sent")
+		return
+	}
+	c, ok := s.bridgeAnchor(prev.Path, prev.Line, prev.EndLine, prev.Side, prev.Snippet)
+	if !ok { // the file is gone: keep the anchor as it was sent
+		c = prev
+	}
+	c.ID, c.Text, c.InReplyTo = bridgeID("c-"), text, prev.ID
+	if out, ok := s.sendBridge(w, bridgeMsg{Kind: "review", Comments: []bridgeComment{c}}); ok {
+		writeJSON(w, out)
+	}
+}
+
+// handleBridgeToGitHub copies a Claude comment into the GitHub review drafts.
+// A pending one leaves the Claude queue; one already sent keeps its thread
+// and Claude's replies here, and is marked as also being a GitHub draft.
+func (s *Server) handleBridgeToGitHub(w http.ResponseWriter, r *http.Request) {
+	if !s.bridgeOrFail(w) || !s.prOrFail(w) || !localPost(w, r) {
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !decodeBridgeBody(w, r, &body) {
+		return
+	}
+	var pending *bridgeComment
+	for _, d := range s.bridgeDrafts() {
+		if d.ID == body.ID {
+			pending = &d
+			break
+		}
+	}
+	if pending != nil {
+		gh := s.addPRDraft(pending.Path, pending.Line, pending.Side, pending.Text)
+		s.session.Update(func(ws *WorkspaceSession) {
+			for i, d := range ws.BridgeDrafts {
+				if d.ID == body.ID {
+					ws.BridgeDrafts = append(ws.BridgeDrafts[:i:i], ws.BridgeDrafts[i+1:]...)
+					break
+				}
+			}
+		})
+		writeJSON(w, gh)
+		return
+	}
+	sent, _ := s.bridge.snapshot()
+	c, ok := bridgeFindComment(sent, body.ID)
+	if !ok {
+		fail(w, http.StatusNotFound, "no such comment")
+		return
+	}
+	gh := s.addPRDraft(c.Path, c.Line, c.Side, c.Text)
+	s.session.Update(func(ws *WorkspaceSession) {
+		if ws.BridgeGitHub == nil {
+			ws.BridgeGitHub = map[string]int64{}
+		}
+		ws.BridgeGitHub[c.ID] = gh.ID
+	})
+	writeJSON(w, gh)
 }
 
 // bridgeAnchor validates where a comment points and reads the code around it.
@@ -538,37 +681,30 @@ func (s *Server) handleBridgeDrafts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"drafts": drafts, "draft": c})
 }
 
-// handleBridgeReview sends every draft, plus an optional overall note, as one
-// "review" line, so the session is woken once for the whole batch rather
-// than once per comment. The drafts are cleared only after the line is written.
+// handleBridgeReview is Ask Claude: it sends every pending comment, plus an
+// optional overall note, as one "review" line, so the session is woken once
+// for the whole batch. Pending comments are cleared only after the line is written.
 func (s *Server) handleBridgeReview(w http.ResponseWriter, r *http.Request) {
-	if !s.bridgeOrFail(w) {
-		return
-	}
-	if !localPost(w, r) {
+	if !s.bridgeOrFail(w) || !localPost(w, r) {
 		return
 	}
 	var body struct {
 		Text string `json:"text"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<17)).Decode(&body); err != nil {
-		fail(w, http.StatusBadRequest, "invalid JSON")
+	if !decodeBridgeBody(w, r, &body) {
 		return
 	}
-	drafts := s.bridgeDrafts()
-	if len(drafts) == 0 {
-		fail(w, http.StatusBadRequest, "no drafts to send")
+	pending := s.bridgeDrafts()
+	if len(pending) == 0 {
+		fail(w, http.StatusBadRequest, "no pending comments to send")
 		return
 	}
-	m := bridgeMsg{Kind: "review", Text: strings.TrimSpace(body.Text), Comments: drafts}
-	s.bridgeOrigin(&m)
-	sent, err := s.bridge.Send(m)
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
+	sent, ok := s.sendBridge(w, bridgeMsg{Kind: "review", Text: strings.TrimSpace(body.Text), Comments: pending})
+	if !ok {
 		return
 	}
-	sentIDs := make(map[string]bool, len(drafts))
-	for _, d := range drafts {
+	sentIDs := make(map[string]bool, len(pending))
+	for _, d := range pending {
 		sentIDs[d.ID] = true
 	}
 	s.session.Update(func(ws *WorkspaceSession) {

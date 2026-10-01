@@ -86,37 +86,39 @@ func TestBridgeChannelLayout(t *testing.T) {
 	}
 }
 
-func TestBridgeSendAppendsOneLinePerMessage(t *testing.T) {
+func TestBridgeSendAndReload(t *testing.T) {
 	b := newTestBridge(t, "send")
-	m, err := b.Send(bridgeMsg{Kind: "comment", Text: "why is this\nnil?", Path: "a.go", Line: 3, Side: "RIGHT", Snippet: "3: x := nil"})
+	m, err := b.Send(bridgeMsg{Kind: "review", Comments: []bridgeComment{{ID: "c-1", Path: "a.go", Line: 3, Side: "RIGHT", Text: "why is this\nnil?", Snippet: "3: x := nil"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.ID == "" || m.TS == "" {
+	if !strings.HasPrefix(m.ID, "rv-") || m.TS == "" {
 		t.Fatalf("Send did not stamp id/ts: %+v", m)
 	}
-	if _, err := b.Send(bridgeMsg{Kind: "chat", Text: "hello"}); err != nil {
-		t.Fatal(err)
+	if c, _ := b.Send(bridgeMsg{Kind: "chat", Text: "hello"}); !strings.HasPrefix(c.ID, "m-") {
+		t.Fatalf("chat id = %q", c.ID)
 	}
 	lines := readJSONLines(t, b.inbox)
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want 2", len(lines))
+	if len(lines) != 2 || lines[0]["id"] != m.ID || lines[1]["kind"] != "chat" {
+		t.Fatalf("inbox = %v", lines)
 	}
-	first := lines[0]
-	if first["id"] != m.ID || first["kind"] != "comment" || first["text"] != "why is this\nnil?" || first["path"] != "a.go" || first["line"] != float64(3) || first["side"] != "RIGHT" || first["snippet"] != "3: x := nil" {
-		t.Fatalf("first line = %v", first)
-	}
-	if _, ok := lines[1]["path"]; ok {
-		t.Fatalf("chat message carries an empty path: %v", lines[1])
+	if _, ok := lines[1]["comments"]; ok {
+		t.Fatalf("chat line carries comments: %v", lines[1])
 	}
 
-	// A new process on the same channel picks the history back up.
+	// A line from an earlier build (kind "comment", anchor at the top level)
+	// reloads as a one-comment review, so old threads keep their place.
+	appendFile(t, b.inbox, `{"id":"m-old","ts":"2026-01-01T00:00:00Z","kind":"comment","text":"old q","path":"b.go","line":7}`+"\n")
 	again, err := newBridge("send")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sent, _ := again.snapshot(); len(sent) != 2 || sent[0].ID != m.ID {
+	sent, _ := again.snapshot()
+	if len(sent) != 3 || sent[0].ID != m.ID {
 		t.Fatalf("history not reloaded: %+v", sent)
+	}
+	if old := sent[2]; old.Kind != "review" || len(old.Comments) != 1 || old.Comments[0].ID != "m-old" || old.Comments[0].Path != "b.go" || old.Comments[0].Line != 7 || old.Comments[0].Text != "old q" {
+		t.Fatalf("legacy line = %+v", old)
 	}
 }
 
@@ -140,38 +142,35 @@ func TestBridgeSendConcurrentLinesStayWhole(t *testing.T) {
 
 func TestBridgeOutboxTail(t *testing.T) {
 	b := newTestBridge(t, "tail")
-	a, _ := b.Send(bridgeMsg{Kind: "comment", Text: "q1", Path: "a.go", Line: 1})
-	c, _ := b.Send(bridgeMsg{Kind: "chat", Text: "q2"})
+	b.Send(bridgeMsg{Kind: "review", Comments: []bridgeComment{{ID: "c-a", Path: "a.go", Line: 1, Text: "q1"}}})
+	chat, _ := b.Send(bridgeMsg{Kind: "chat", Text: "q2"})
 
-	appendFile(t, b.outbox, `{"id":"r1","ts":"2026-01-01T00:00:00Z","reply_to":"`+a.ID+`","text":"**answer** one"}`+"\n")
+	appendFile(t, b.outbox, `{"id":"r1","ts":"2026-01-01T00:00:00Z","reply_to":"c-a","text":"**answer** one"}`+"\n")
 	appendFile(t, b.outbox, "not json\n\n")
-	appendFile(t, b.outbox, `{"reply_to":"`+c.ID+`","text":"answer two"}`+"\n")
-	appendFile(t, b.outbox, `{"reply_to":"`+a.ID+`","text":"half`) // still being written
+	appendFile(t, b.outbox, `{"reply_to":"`+chat.ID+`","text":"answer two"}`+"\n")
+	appendFile(t, b.outbox, `{"reply_to":"c-a","text":"half`) // still being written
 	b.poll()
 
-	threads, loose := threadBridgeReplies(b.snapshot())
-	if len(threads) != 2 || len(loose) != 0 {
-		t.Fatalf("threads=%d loose=%d", len(threads), len(loose))
+	threads, conv := bridgeView(b.snapshot())
+	if len(threads) != 1 || len(threads[0].Items) != 2 || threads[0].Items[1].ID != "r1" || threads[0].Items[1].Who != "claude" {
+		t.Fatalf("threads = %+v", threads)
 	}
-	if r := threads[0].Replies; len(r) != 1 || r[0].ID != "r1" || r[0].Text != "**answer** one" {
-		t.Fatalf("comment replies = %+v", r)
-	}
-	if r := threads[1].Replies; len(r) != 1 || r[0].Text != "answer two" || r[0].ID == "" || r[0].TS == "" {
-		t.Fatalf("chat replies = %+v (id and ts should be filled in)", r)
+	if len(conv) != 2 || conv[1].Text != "answer two" || conv[1].Kind != "reply" || conv[1].ID == "" || conv[1].TS == "" {
+		t.Fatalf("conversation = %+v (id and ts should be filled in)", conv)
 	}
 
-	appendFile(t, b.outbox, ` done"}`+"\n"+`{"text":"unprompted note"}`+"\n"+`{"reply_to":"m-gone","text":"orphan"}`+"\n")
+	appendFile(t, b.outbox, ` done"}`+"\n"+`{"text":"unprompted note"}`+"\n")
 	b.poll()
-	threads, loose = threadBridgeReplies(b.snapshot())
-	if r := threads[0].Replies; len(r) != 2 || r[1].Text != "half done" {
-		t.Fatalf("partial line not completed: %+v", r)
+	threads, conv = bridgeView(b.snapshot())
+	if it := threads[0].Items; len(it) != 3 || it[2].Text != "half done" {
+		t.Fatalf("partial line not completed: %+v", it)
 	}
-	if len(loose) != 2 || loose[0].Text != "unprompted note" || loose[1].Text != "orphan" {
-		t.Fatalf("loose = %+v", loose)
+	if len(conv) != 3 || conv[2].Text != "unprompted note" {
+		t.Fatalf("a reply naming nothing should land in the conversation: %+v", conv)
 	}
 
 	// Truncating the outbox starts it over rather than reading past the end.
-	if err := os.WriteFile(b.outbox, []byte(`{"reply_to":"`+c.ID+`","text":"fresh"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(b.outbox, []byte(`{"reply_to":"c-a","text":"fresh"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	b.poll()
@@ -191,57 +190,6 @@ func bridgePost(t *testing.T, s *Server, path string, body any) (int, map[string
 	var m map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &m)
 	return rec.Code, m
-}
-
-func TestBridgeHTTP(t *testing.T) {
-	s, _ := newTestServer(t)
-	if code, _ := get(t, s, "/api/bridge"); code != http.StatusNotFound {
-		t.Fatalf("without -bridge, /api/bridge = %d, want 404", code)
-	}
-	if _, meta := get(t, s, "/api/meta"); meta["bridge"] != nil {
-		t.Fatalf("meta carries a bridge without -bridge: %v", meta["bridge"])
-	}
-
-	b := newTestBridge(t, "http")
-	s.SetBridge(b)
-
-	code, sent := bridgePost(t, s, "/api/bridge/send", map[string]any{"text": "what does greet print?", "path": "greet.go", "line": 6})
-	if code != http.StatusOK {
-		t.Fatalf("send = %d %v", code, sent)
-	}
-	lines := readJSONLines(t, b.inbox)
-	if len(lines) != 1 {
-		t.Fatalf("inbox has %d lines", len(lines))
-	}
-	got := lines[0]
-	if got["kind"] != "comment" || got["path"] != "greet.go" || got["line"] != float64(6) || got["repo"] == "" {
-		t.Fatalf("inbox line = %v", got)
-	}
-	if snip, _ := got["snippet"].(string); !strings.Contains(snip, "6: \tfmt.Println(s)") || !strings.HasPrefix(snip, "3: ") {
-		t.Fatalf("snippet = %q", snip)
-	}
-
-	if code, _ := bridgePost(t, s, "/api/bridge/send", map[string]any{"text": "x", "path": "../etc/passwd", "line": 1}); code != http.StatusBadRequest {
-		t.Fatalf("path outside the workspace = %d, want 400", code)
-	}
-	if code, _ := bridgePost(t, s, "/api/bridge/send", map[string]any{"text": "  "}); code != http.StatusBadRequest {
-		t.Fatalf("empty text = %d, want 400", code)
-	}
-
-	appendFile(t, b.outbox, `{"reply_to":"`+sent["id"].(string)+`","text":"It prints s."}`+"\n")
-	b.poll()
-	code, view := get(t, s, "/api/bridge")
-	if code != http.StatusOK {
-		t.Fatalf("/api/bridge = %d", code)
-	}
-	msgs, _ := view["messages"].([]any)
-	if len(msgs) != 1 {
-		t.Fatalf("messages = %v", view["messages"])
-	}
-	replies, _ := msgs[0].(map[string]any)["replies"].([]any)
-	if len(replies) != 1 || replies[0].(map[string]any)["text"] != "It prints s." {
-		t.Fatalf("replies = %v", replies)
-	}
 }
 
 // recordingProvider is a GitProvider that fails the test on any call that
@@ -297,6 +245,49 @@ func (f failTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return nil, errors.New("network disabled in test")
 }
 
+func draftOp(t *testing.T, s *Server, body map[string]any) map[string]any {
+	t.Helper()
+	code, m := bridgePost(t, s, "/api/bridge/drafts", body)
+	if code != http.StatusOK {
+		t.Fatalf("drafts %v = %d %v", body["op"], code, m)
+	}
+	return m
+}
+
+func TestBridgeHTTP(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	s, _ := newTestServer(t)
+	if code, _ := get(t, s, "/api/bridge"); code != http.StatusNotFound {
+		t.Fatalf("without -bridge, /api/bridge = %d, want 404", code)
+	}
+	if _, meta := get(t, s, "/api/meta"); meta["bridge"] != nil {
+		t.Fatalf("meta carries a bridge without -bridge: %v", meta["bridge"])
+	}
+	b := newTestBridge(t, "http")
+	s.SetBridge(b)
+
+	if code, _ := bridgePost(t, s, "/api/bridge/drafts", map[string]any{"op": "add", "text": "x", "path": "../etc/passwd", "line": 1}); code != http.StatusBadRequest {
+		t.Fatalf("path outside the workspace = %d, want 400", code)
+	}
+	if code, _ := bridgePost(t, s, "/api/bridge/chat", map[string]any{"text": "  "}); code != http.StatusBadRequest {
+		t.Fatalf("empty chat = %d, want 400", code)
+	}
+	code, chat := bridgePost(t, s, "/api/bridge/chat", map[string]any{"text": "what next?"})
+	if code != http.StatusOK || chat["kind"] != "chat" {
+		t.Fatalf("chat = %d %v", code, chat)
+	}
+	if lines := readJSONLines(t, b.inbox); len(lines) != 1 || lines[0]["text"] != "what next?" || lines[0]["repo"] == "" {
+		t.Fatalf("inbox = %v", lines)
+	}
+	appendFile(t, b.outbox, `{"reply_to":"`+chat["id"].(string)+`","text":"Tests."}`+"\n")
+	b.poll()
+	_, view := get(t, s, "/api/bridge")
+	conv := view["conversation"].([]any)
+	if len(conv) != 2 || conv[1].(map[string]any)["who"] != "claude" || conv[1].(map[string]any)["text"] != "Tests." {
+		t.Fatalf("conversation = %v", conv)
+	}
+}
+
 func TestBridgeCommentsNeverCallGitHub(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	prev := githubHTTPClient.Transport
@@ -314,39 +305,28 @@ func TestBridgeCommentsNeverCallGitHub(t *testing.T) {
 	b := newTestBridge(t, "local")
 	s.SetBridge(b)
 
-	if code, m := bridgePost(t, s, "/api/bridge/send", map[string]any{"kind": "comment", "text": "private note", "path": "main.go", "line": 4, "side": "RIGHT"}); code != http.StatusOK {
-		t.Fatalf("comment = %d %v", code, m)
-	}
-	if code, m := bridgePost(t, s, "/api/bridge/send", map[string]any{"kind": "chat", "text": "what next?"}); code != http.StatusOK {
-		t.Fatalf("chat = %d %v", code, m)
-	}
-	// The GitHub draft is local too until the review is explicitly submitted.
-	if code, m := bridgePost(t, s, "/api/pr/comments", map[string]any{"path": "main.go", "line": 4, "side": "RIGHT", "body": "draft"}); code != http.StatusOK {
-		t.Fatalf("draft = %d %v", code, m)
-	}
-	if code, m := bridgePost(t, s, "/api/bridge/drafts", map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "batched"}); code != http.StatusOK {
-		t.Fatalf("bridge draft = %d %v", code, m)
-	}
-	if code, m := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "all of it"}); code != http.StatusOK {
-		t.Fatalf("bridge review = %d %v", code, m)
+	c := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "side": "RIGHT", "text": "private note"})["draft"].(map[string]any)
+	for _, step := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"/api/bridge/review", map[string]any{"text": "all of it"}},
+		{"/api/bridge/reply", map[string]any{"id": c["id"], "text": "and also"}},
+		{"/api/bridge/chat", map[string]any{"text": "what next?"}},
+		{"/api/bridge/to-github", map[string]any{"id": c["id"]}}, // a GitHub *draft*: still local
+		{"/api/pr/comments", map[string]any{"path": "main.go", "line": 4, "side": "RIGHT", "body": "draft"}},
+	} {
+		if code, m := bridgePost(t, s, step.path, step.body); code != http.StatusOK {
+			t.Fatalf("%s = %d %v", step.path, code, m)
+		}
 	}
 	if len(prov.calls) != 0 {
 		t.Fatalf("forge calls: %v", prov.calls)
 	}
-
 	lines := readJSONLines(t, b.inbox)
-	if len(lines) != 3 || lines[2]["kind"] != "review" || lines[0]["repo"] != "o/r" || lines[0]["pr"] != float64(9) || lines[0]["commit"] != "abc123" {
+	if len(lines) != 3 || lines[0]["repo"] != "o/r" || lines[0]["pr"] != float64(9) || lines[0]["commit"] != "abc123" {
 		t.Fatalf("inbox = %v", lines)
 	}
-}
-
-func draftOp(t *testing.T, s *Server, body map[string]any) map[string]any {
-	t.Helper()
-	code, m := bridgePost(t, s, "/api/bridge/drafts", body)
-	if code != http.StatusOK {
-		t.Fatalf("drafts %v = %d %v", body["op"], code, m)
-	}
-	return m
 }
 
 func TestBridgeReviewSendsOneLine(t *testing.T) {
@@ -356,20 +336,20 @@ func TestBridgeReviewSendsOneLine(t *testing.T) {
 	s.SetBridge(b)
 
 	if code, _ := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "x"}); code != http.StatusBadRequest {
-		t.Fatalf("review with no drafts = %d, want 400", code)
+		t.Fatalf("Ask Claude with nothing pending = %d, want 400", code)
 	}
 	d1 := draftOp(t, s, map[string]any{"op": "add", "path": "greet.go", "line": 5, "endLine": 6, "side": "RIGHT", "text": "first"})["draft"].(map[string]any)
 	d2 := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "second"})["draft"].(map[string]any)
 	d3 := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 1, "text": "dropped"})["draft"].(map[string]any)
 	draftOp(t, s, map[string]any{"op": "update", "id": d2["id"], "text": "second, edited"})
 	if left := draftOp(t, s, map[string]any{"op": "delete", "id": d3["id"]})["drafts"].([]any); len(left) != 2 {
-		t.Fatalf("after delete, %d drafts", len(left))
+		t.Fatalf("after delete, %d pending", len(left))
 	}
 	if code, _ := bridgePost(t, s, "/api/bridge/drafts", map[string]any{"op": "update", "id": "c-nope", "text": "x"}); code != http.StatusNotFound {
-		t.Fatalf("update of a missing draft = %d, want 404", code)
+		t.Fatalf("update of a missing comment = %d, want 404", code)
 	}
 	if n := len(readJSONLines(t, b.inbox)); n != 0 {
-		t.Fatalf("drafts reached the inbox before sending: %d lines", n)
+		t.Fatalf("pending comments reached the inbox before Ask Claude: %d lines", n)
 	}
 
 	code, sent := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "overall: looks close"})
@@ -384,9 +364,6 @@ func TestBridgeReviewSendsOneLine(t *testing.T) {
 	if rv["kind"] != "review" || rv["text"] != "overall: looks close" || rv["id"] != sent["id"] || !strings.HasPrefix(rv["id"].(string), "rv-") || rv["ts"] == "" || rv["repo"] == "" {
 		t.Fatalf("review line = %v", rv)
 	}
-	if _, ok := rv["path"]; ok {
-		t.Fatalf("review line carries a top-level path: %v", rv)
-	}
 	cs := rv["comments"].([]any)
 	if len(cs) != 2 {
 		t.Fatalf("comments = %v", cs)
@@ -395,42 +372,110 @@ func TestBridgeReviewSendsOneLine(t *testing.T) {
 	if c1["id"] != d1["id"] || c1["path"] != "greet.go" || c1["line"] != float64(5) || c1["end_line"] != float64(6) || c1["side"] != "RIGHT" || c1["text"] != "first" {
 		t.Fatalf("comment 1 = %v", c1)
 	}
-	if snip, _ := c1["snippet"].(string); !strings.Contains(snip, "6: \tfmt.Println(s)") {
+	if snip, _ := c1["snippet"].(string); !strings.Contains(snip, "6: \tfmt.Println(s)") || !strings.HasPrefix(snip, "2: ") {
 		t.Fatalf("comment 1 snippet = %q", snip)
 	}
-	if c2["id"] != d2["id"] || c2["text"] != "second, edited" {
-		t.Fatalf("comment 2 = %v", c2)
+	if _, ok := c1["in_reply_to"]; ok || c2["id"] != d2["id"] || c2["text"] != "second, edited" {
+		t.Fatalf("comment 2 = %v (and no in_reply_to on a first comment)", c2)
 	}
-	if _, view := get(t, s, "/api/bridge"); len(view["drafts"].([]any)) != 0 {
-		t.Fatalf("drafts not cleared after sending: %v", view["drafts"])
+	if _, view := get(t, s, "/api/bridge"); len(view["pending"].([]any)) != 0 {
+		t.Fatalf("pending not cleared after sending: %v", view["pending"])
 	}
 }
 
-func TestBridgeReviewReplyThreading(t *testing.T) {
+func TestBridgeThreadsAndFollowUps(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	s, _ := newTestServer(t)
 	b := newTestBridge(t, "rthread")
 	s.SetBridge(b)
-	draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "a"})
+	c1 := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "a"})["draft"].(map[string]any)
 	c2 := draftOp(t, s, map[string]any{"op": "add", "path": "greet.go", "line": 6, "text": "b"})["draft"].(map[string]any)
-	_, rv := bridgePost(t, s, "/api/bridge/review", map[string]any{})
+	_, rv := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "both"})
 
 	appendFile(t, b.outbox, `{"reply_to":"`+rv["id"].(string)+`","text":"combined answer"}`+"\n")
 	appendFile(t, b.outbox, `{"reply_to":"`+c2["id"].(string)+`","text":"about b"}`+"\n")
 	b.poll()
 
+	// A follow-up under b is one review line with one comment that names b.
+	if code, _ := bridgePost(t, s, "/api/bridge/reply", map[string]any{"id": "c-unknown", "text": "x"}); code != http.StatusBadRequest {
+		t.Fatalf("reply to an unknown comment = %d, want 400", code)
+	}
+	code, fu := bridgePost(t, s, "/api/bridge/reply", map[string]any{"id": c2["id"], "text": "why not 7?"})
+	if code != http.StatusOK {
+		t.Fatalf("reply = %d %v", code, fu)
+	}
+	line := readJSONLines(t, b.inbox)[1]
+	fc := line["comments"].([]any)
+	if line["kind"] != "review" || line["text"] != "" || len(fc) != 1 {
+		t.Fatalf("follow-up line = %v", line)
+	}
+	f := fc[0].(map[string]any)
+	if f["in_reply_to"] != c2["id"] || f["path"] != "greet.go" || f["line"] != float64(6) || f["text"] != "why not 7?" || f["id"] == c2["id"] {
+		t.Fatalf("follow-up comment = %v", f)
+	}
+	appendFile(t, b.outbox, `{"reply_to":"`+f["id"].(string)+`","text":"7 is the closing brace."}`+"\n")
+	b.poll()
+
 	_, view := get(t, s, "/api/bridge")
-	msgs := view["messages"].([]any)
-	if len(msgs) != 1 || len(view["loose"].([]any)) != 0 {
-		t.Fatalf("messages=%v loose=%v", msgs, view["loose"])
+	threads := view["threads"].([]any)
+	if len(threads) != 2 {
+		t.Fatalf("threads = %v", threads)
 	}
-	m := msgs[0].(map[string]any)
-	if r := m["replies"].([]any); len(r) != 1 || r[0].(map[string]any)["text"] != "combined answer" {
-		t.Fatalf("review-level replies = %v", r)
+	ta, tb := threads[0].(map[string]any), threads[1].(map[string]any)
+	if ta["id"] != c1["id"] || len(ta["items"].([]any)) != 1 {
+		t.Fatalf("thread a = %v", ta)
 	}
-	per := m["comment_replies"].(map[string]any)
-	if r, _ := per[c2["id"].(string)].([]any); len(r) != 1 || r[0].(map[string]any)["text"] != "about b" || len(per) != 1 {
-		t.Fatalf("comment-level replies = %v", per)
+	var got []string
+	for _, it := range tb["items"].([]any) {
+		m := it.(map[string]any)
+		got = append(got, m["who"].(string)+":"+m["text"].(string))
+	}
+	if want := "you:b|claude:about b|you:why not 7?|claude:7 is the closing brace."; strings.Join(got, "|") != want {
+		t.Fatalf("thread b = %q, want %q", strings.Join(got, "|"), want)
+	}
+	conv := view["conversation"].([]any)
+	if len(conv) != 2 || conv[0].(map[string]any)["kind"] != "note" || conv[0].(map[string]any)["count"] != float64(2) || conv[1].(map[string]any)["text"] != "combined answer" {
+		t.Fatalf("conversation = %v", conv)
+	}
+}
+
+func TestBridgeToGitHubKeepsThread(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	s, _ := newTestServer(t)
+	s.pr = &prSession{target: PRTarget{Owner: "o", Repo: "r", Number: 3}, meta: PRMeta{Number: 3}}
+	b := newTestBridge(t, "togh")
+	s.SetBridge(b)
+
+	// Pending: becomes a GitHub draft and leaves the Claude queue.
+	p := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 2, "text": "for github"})["draft"].(map[string]any)
+	if code, gh := bridgePost(t, s, "/api/bridge/to-github", map[string]any{"id": p["id"]}); code != http.StatusOK || gh["body"] != "for github" {
+		t.Fatalf("move pending = %d %v", code, gh)
+	}
+	if _, view := get(t, s, "/api/bridge"); len(view["pending"].([]any)) != 0 {
+		t.Fatalf("pending after move = %v", view["pending"])
+	}
+
+	// Sent: copied to a GitHub draft, thread and replies stay.
+	c := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "asked"})["draft"].(map[string]any)
+	bridgePost(t, s, "/api/bridge/review", map[string]any{})
+	appendFile(t, b.outbox, `{"reply_to":"`+c["id"].(string)+`","text":"answer"}`+"\n")
+	b.poll()
+	if code, _ := bridgePost(t, s, "/api/bridge/to-github", map[string]any{"id": c["id"]}); code != http.StatusOK {
+		t.Fatalf("move sent = %d", code)
+	}
+	if len(s.pr.comments) != 2 || s.pr.comments[1].Body != "asked" || s.pr.comments[1].Line != 4 {
+		t.Fatalf("GitHub drafts = %+v", s.pr.comments)
+	}
+	_, view := get(t, s, "/api/bridge")
+	th := view["threads"].([]any)[0].(map[string]any)
+	if th["github"] != true || len(th["items"].([]any)) != 2 {
+		t.Fatalf("thread after move = %v", th)
+	}
+	// Deleting the GitHub draft clears the mark; the Claude thread stays.
+	bridgePost(t, s, fmt.Sprintf("/api/pr/comments/delete?id=%d", s.pr.comments[1].ID), map[string]any{})
+	_, view = get(t, s, "/api/bridge")
+	if th := view["threads"].([]any)[0].(map[string]any); th["github"] != nil || len(th["items"].([]any)) != 2 {
+		t.Fatalf("thread after GitHub draft deleted = %v", th)
 	}
 }
 
@@ -445,12 +490,12 @@ func TestBridgeDraftsPersist(t *testing.T) {
 	ix.Build()
 	again := NewServer(ix, nil)
 	again.SetBridge(s.bridge)
-	if _, view := get(t, again, "/api/bridge"); len(view["drafts"].([]any)) != 1 {
-		t.Fatalf("drafts after restart = %v", view["drafts"])
+	if _, view := get(t, again, "/api/bridge"); len(view["pending"].([]any)) != 1 {
+		t.Fatalf("pending after restart = %v", view["pending"])
 	}
 
 	// A PR review checks out into a new temp dir each run; its session is keyed
-	// by the PR, so drafts come back there too.
+	// by the PR, so pending comments come back there too.
 	target := PRTarget{Provider: "github", Owner: "o", Repo: "r", Number: 5}
 	pr1, _ := newTestServer(t)
 	pr1.SetBridge(s.bridge)
@@ -461,7 +506,17 @@ func TestBridgeDraftsPersist(t *testing.T) {
 	pr2.SetBridge(s.bridge)
 	pr2.SetPR(&prSession{target: target, meta: PRMeta{Number: 5}, diffBase: "HEAD"})
 	_, view := get(t, pr2, "/api/bridge")
-	if d := view["drafts"].([]any); len(d) != 1 || d[0].(map[string]any)["text"] != "pr note" {
-		t.Fatalf("PR drafts after restart = %v", view["drafts"])
+	if d := view["pending"].([]any); len(d) != 1 || d[0].(map[string]any)["text"] != "pr note" {
+		t.Fatalf("PR pending after restart = %v", view["pending"])
+	}
+}
+
+func TestBridgeInstruction(t *testing.T) {
+	b := newTestBridge(t, "instr")
+	got := b.Instruction()
+	for _, want := range []string{"tail -n0 -F " + b.inbox, b.outbox, `kind "review"`, "in_reply_to", `"reply_to":"<comment id>"`, `kind "chat"`, "Do not post anything to GitHub"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instruction lacks %q:\n%s", want, got)
+		}
 	}
 }

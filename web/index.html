@@ -299,6 +299,15 @@
            each pinned beside the diff line it's on (or docked bottom-right
            when that file isn't the one on screen). web/src/pr.js owns it. -->
       <div id="pr-comment-list" class="pr-comment-list" hidden></div>
+      <!-- -bridge only (web/src/bridge.js): a thread or composer for a line in
+           the source view, and the one send button for pending comments -->
+      <div id="br-dock" class="br-dock" hidden></div>
+      <div id="br-ask" class="br-ask" hidden>
+        <div id="br-ask-pop" class="br-ask-pop" hidden>
+          <textarea id="br-ask-note" class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Overall note for Claude (optional)..."></textarea>
+        </div>
+        <div class="br-ask-row"><button id="br-ask-send" class="br-ask-main">Ask Claude</button><button id="br-ask-more" class="br-ask-more" title="Add an overall note" aria-label="Add an overall note">▾</button></div>
+      </div>
     </div>
 
     <!-- PR comments bottom panel: existing GitHub comments (top-level and
@@ -313,6 +322,15 @@
         <button id="pr-comments-collapse" class="pr-comments-collapse" title="Expand/collapse comments panel">&#9662;</button>
       </div>
       <div id="pr-comments-body" class="pr-comments-body">
+        <!-- -bridge only (web/src/bridge.js): chat, overall notes, and Claude's replies to them -->
+        <div id="br-conv-section" class="br-conv-section" hidden>
+          <div class="pr-comments-section-title">Claude</div>
+          <div id="br-conv" class="br-conv"></div>
+          <div class="pr-issue-compose">
+            <textarea id="br-chat-input" class="pr-review-body" rows="2" spellcheck="false" autocomplete="off" placeholder="Message your Claude Code session (stays on this machine)..."></textarea>
+            <button id="br-chat-send" class="footer-btn">Send to Claude</button>
+          </div>
+        </div>
         <div id="pr-comments-list" class="pr-comments-list"></div>
         <div id="pr-issue-compose" class="pr-issue-compose">
           <textarea id="pr-issue-compose-body" class="pr-review-body" rows="2" spellcheck="false" autocomplete="off" placeholder="Write a comment on the PR conversation..."></textarea>
@@ -390,7 +408,6 @@
     <header class="inspector-head">
       <div class="inspector-tabs">
         <button class="inspector-tab" data-itab="threads" id="tab-threads" title="Long-running conversations with a coding harness ({Alt+T} on a selection)" hidden>Threads<span class="thr-tab-count" hidden></span><span class="thr-tab-dot" hidden></span></button>
-        <button class="inspector-tab" data-itab="bridge" id="tab-bridge" title="Messages to and from the Claude Code session on this -bridge channel ({Alt+K} on a selection)" hidden>Claude<span class="thr-tab-count" id="br-tab-count" hidden></span></button>
         <button class="inspector-tab active" data-itab="refs" title="View references across workspace">References</button>
         <button class="inspector-tab" data-itab="symbols" title="View file symbols outline">Symbols</button>
         <button class="inspector-tab" data-itab="calls" title="Trace callers and callees ({Alt+Shift+H})">Calls</button>
@@ -517,34 +534,6 @@
             <button id="thr-stop" class="agent-cancel" title="Stop this reply" hidden>Stop</button>
             <button id="thr-send" class="agent-send" title="Send message">Send</button>
           </div>
-        </div>
-      </div>
-    </section>
-    <!-- Right Pane 6: Claude bridge (-bridge only). Comments and chat sent to an
-         already running Claude Code session through files, with its replies
-         threaded under them. Nothing here reaches GitHub. web/src/bridge.js owns it. -->
-    <section class="inspector-pane" id="pane-right-bridge">
-      <div class="inspector-bar">
-        <span class="inspector-sym-title" id="br-channel"></span>
-      </div>
-      <div id="br-msgs" class="thr-msgs"></div>
-      <!-- Unsent drafts, kept in the session file; sent together as one "review" line -->
-      <div id="br-drafts" class="br-drafts" hidden>
-        <div class="br-drafts-head"><span id="br-drafts-count"></span><span class="grow"></span><span class="agent-hint">not sent yet</span></div>
-        <div id="br-drafts-list" class="br-drafts-list"></div>
-        <textarea id="br-review-note" class="agent-input" rows="2" spellcheck="false" autocomplete="off" placeholder="Overall note for this batch (optional)..."></textarea>
-        <div class="agent-foot">
-          <span class="grow"></span>
-          <button id="br-review-send" class="agent-send" title="Send every draft and the note to Claude as one message">Send drafts to Claude</button>
-        </div>
-      </div>
-      <div class="thr-compose">
-        <div id="br-anchor" class="thr-anchor" hidden></div>
-        <textarea id="br-input" class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Message your Claude Code session (local only, never posted to GitHub)..."></textarea>
-        <div class="agent-foot">
-          <span class="agent-hint">Enter to send, Shift+Enter for a new line</span>
-          <button id="br-send-now" class="agent-now" title="Send this one comment to Claude right away, without the drafts" hidden>Send Now</button>
-          <button id="br-send" class="agent-send" title="Send to the Claude Code session">Send to Claude</button>
         </div>
       </div>
     </section>

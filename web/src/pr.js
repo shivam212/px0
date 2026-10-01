@@ -9,13 +9,14 @@
 import { $, S, doc_, esc, api, apiPostJson, keyLabel, withKeys } from './state.js';
 import { showToast } from './ui.js';
 import { setReviewHandler, SEL_MENU_ITEMS } from './selbar.js';
-import { diffview, setPRSyncHandler } from './diff.js';
+import { diffview, onDiffSync } from './diff.js';
 import { reloadWorkspace } from './agent.js';
 import { openFile } from './tabs.js';
 import { refreshTree } from './tree.js';
 import { layout, render } from './renderer.js';
 import { openSettings } from './settings.js';
-import { bridgeOn, sendToBridge, addBridgeDraft, markBridgeDiff, openBridge } from './bridge.js';
+import { bridgeOn } from './bridge.js';
+import { initCommentsPanel } from './commentspanel.js';
 import { on } from './bus.js';
 
 let meta = null;      // this session's PR info: {number, title, base, head, writeAccess, readOnly}
@@ -32,14 +33,14 @@ export function initPR() {
   document.body.classList.add('pr-mode');
 
   if (!SEL_MENU_ITEMS.some(item => item.sel === 'review-comment')) {
-    SEL_MENU_ITEMS.push({ sel: 'review-comment', label: bridgeOn() ? 'Comment (Claude or GitHub draft)' : 'Add Review Comment', keys: 'Alt+R' });
+    SEL_MENU_ITEMS.push({ sel: 'review-comment', label: 'Add Review Comment', keys: 'Alt+R' });
   }
-  if (bridgeOn()) labelGitHubActions();
-  setReviewHandler(openCommentComposer);
-  setPRSyncHandler(renderMarkersForActiveDoc);
-  on('bridge:drafts', renderMarkersForActiveDoc);
+  setReviewHandler(openCommentComposer); // bridge.js replaces it under -bridge
+  onDiffSync(renderMarkersForActiveDoc);
+  on('pr:drafts-changed', refreshComments); // bridge.js copied a comment into the GitHub drafts
   injectFooterButton();
   wireBarButtons();
+  if (bridgeOn()) tuckGitHubActions();
   wireCommentsPanel();
   renderBar();
   refreshComments();
@@ -138,29 +139,31 @@ function renderBar() {
     cmtBtn.disabled = false;
     cmtBtn.title = meta.readOnly
       ? 'No GitHub token configured -- click to connect and submit'
-      : bridgeOn()
-        ? 'Publish the GitHub review drafts on the PR. A submitted review cannot be deleted.'
-        : 'Submit review with drafts, without approval or change requests';
+      : 'Submit review with drafts, without approval or change requests';
   }
   const composeEl = $('#pr-issue-compose');
   if (composeEl) composeEl.hidden = false;
 }
 
-// Under -bridge a comment goes to Claude by default, so everything that does
-// publish to GitHub says so on the button.
-function labelGitHubActions() {
-  const set = (sel, text, title) => {
-    const el = $(sel);
-    if (!el) return;
-    el.textContent = text;
-    if (title) el.title = title;
-  };
-  set('#pr-submit-comment', 'Post Review to GitHub');
-  set('#pr-submit-request-changes', 'Request Changes on GitHub');
-  set('#pr-submit-approve', 'Approve on GitHub');
-  set('#pr-issue-compose-send', 'Post to GitHub', 'Publishes a comment on the PR conversation');
-  const ta = $('#pr-issue-compose-body');
-  if (ta) ta.placeholder = 'Write a comment to publish on the GitHub PR conversation...';
+// Under -bridge a comment goes to Claude, so the GitHub verdict row (summary,
+// Submit / Request Changes / Approve) stays folded behind one "GitHub ▾" button.
+function tuckGitHubActions() {
+  const row = $('.pr-review-row');
+  const head = $('#pr-bar .pr-bar-row');
+  if (!row || !head || $('#pr-github-menu')) return;
+  row.hidden = true;
+  const btn = document.createElement('button');
+  btn.id = 'pr-github-menu';
+  btn.className = 'footer-btn pr-github-menu';
+  btn.title = 'Review on GitHub: post your GitHub drafts, approve, or request changes';
+  btn.textContent = 'GitHub ▾';
+  btn.addEventListener('click', () => {
+    row.hidden = !row.hidden;
+    btn.classList.toggle('active', !row.hidden);
+    if (!row.hidden) $('#pr-review-body')?.focus();
+    layout(); render();
+  });
+  head.append(btn);
 }
 
 export function nudgeGitHubToken() {
@@ -287,8 +290,8 @@ async function submitReview(event) {
   if (bridgeOn()) {
     const n = comments.length;
     const what = event === 'APPROVE' ? 'an approving review' : event === 'REQUEST_CHANGES' ? 'a changes-requested review' : 'a review';
-    if (!confirm('Publish ' + what + ' on GitHub PR #' + meta.number + ' with ' + n + ' draft comment' + (n === 1 ? '' : 's') +
-      '?\n\nEveryone on the PR will see it, and a submitted review cannot be deleted. Messages sent to Claude are not included.')) return;
+    if (!confirm('Publish ' + what + ' on GitHub PR #' + meta.number + ' with ' + n + ' GitHub draft' + (n === 1 ? '' : 's') +
+      '?\n\nEveryone on the PR will see it, and a submitted review cannot be deleted. Comments for Claude are not included.')) return;
   }
   try {
     await apiPostJson('/api/pr/submit', { event, body });
@@ -414,19 +417,8 @@ export function openCommentComposer(info) {
   const lineEnd = side === 'LEFT' ? (info.delL2 || info.l2) : info.l2;
   const ref = info.path + ':' + (line === lineEnd ? line : line + '-' + lineEnd) + (side === 'LEFT' ? ' (base)' : '');
   const modEnter = keyLabel('Mod+Enter');
-  const toClaude = bridgeOn();
-  box.innerHTML = toClaude
-    ? '<div class="agent-head"><span class="sel-chip">Comment</span>' +
-    '<span class="agent-ref" role="button" tabindex="0" title="Jump to this line">' + esc(ref) + '</span>' +
-    '<span class="grow"></span><button class="agent-close" title="Close (Esc)">✕</button></div>' +
-    '<div class="agent-compose">' +
-    '<textarea class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Note or question for Claude... (' + esc(modEnter) + ' adds a draft; stays on this machine)"></textarea>' +
-    '<div class="agent-err" hidden></div>' +
-    '<div class="agent-foot"><button class="agent-now pr-to-github" title="Add as a GitHub review draft instead. It is published only when you post the review.">Add to GitHub Review</button>' +
-    '<span class="grow"></span>' +
-    '<button class="agent-now pr-claude-now" title="Send just this comment to Claude now, without the drafts">Send Now</button>' +
-    '<button class="agent-send" title="Add to the Claude drafts, sent together from the Claude tab; never to GitHub (' + esc(modEnter) + ')">Add Claude Draft</button></div></div>'
-    : '<div class="agent-head"><span class="sel-chip">Review Comment</span>' +
+  box.innerHTML =
+    '<div class="agent-head"><span class="sel-chip">Review Comment</span>' +
     '<span class="agent-ref" role="button" tabindex="0" title="Jump to this line">' + esc(ref) + '</span>' +
     '<span class="grow"></span><button class="agent-close" title="Close (Esc)">✕</button></div>' +
     '<div class="agent-compose">' +
@@ -456,26 +448,6 @@ export function openCommentComposer(info) {
   };
   box.querySelector('.agent-close')?.addEventListener('click', close);
 
-  const sendClaude = async (now = false) => {
-    if (!ta) return;
-    const text = ta.value.trim();
-    if (!text) return;
-    const errEl = /** @type {HTMLElement|null} */ (box.querySelector('.agent-err'));
-    if (errEl) errEl.hidden = true;
-    const msg = { text, path: info.path, l1: line, l2: lineEnd, side, snippet: info.text };
-    try {
-      if (now) await sendToBridge(msg); else await addBridgeDraft(msg);
-      close();
-      showToast('✓', now ? 'Sent to Claude (not posted to GitHub)' : 'Added a Claude draft (send them from the Claude tab)');
-      if (now) openBridge(null);
-    } catch (e) {
-      if (errEl) {
-        errEl.hidden = false;
-        errEl.textContent = e.message || 'Could not send to Claude';
-      }
-    }
-  };
-
   const send = async () => {
     if (!ta) return;
     const body = ta.value.trim();
@@ -497,13 +469,10 @@ export function openCommentComposer(info) {
       }
     }
   };
-  const primary = toClaude ? () => sendClaude(false) : send;
-  box.querySelector('.pr-claude-now')?.addEventListener('click', () => sendClaude(true));
-  box.querySelector('.agent-send')?.addEventListener('click', primary);
-  box.querySelector('.pr-to-github')?.addEventListener('click', send);
+  box.querySelector('.agent-send')?.addEventListener('click', send);
   ta?.addEventListener('keydown', (/** @type {KeyboardEvent} */ e) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); }
-    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); primary(); }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
   });
 }
 
@@ -565,7 +534,6 @@ function renderMarkersForActiveDoc() {
     });
     el.querySelector('.diff-code')?.before(badge);
   }
-  markBridgeDiff();
 }
 
 /* ---------- bottom panel: existing comments + drafts, always open ---------- */
@@ -587,50 +555,7 @@ function toggleAccordion(item) {
 }
 
 function wireCommentsPanel() {
-  const panel = $('#pr-comments-panel');
-  if (panel) {
-    panel.hidden = false;
-    panel.classList.add('collapsed');
-  }
-
-  const toggle = () => {
-    panel?.classList.toggle('collapsed');
-    layout(); render();
-  };
-
-  $('#pr-comments-collapse')?.addEventListener('click', e => {
-    e.stopPropagation();
-    toggle();
-  });
-
-  $('.pr-comments-panel-head')?.addEventListener('click', e => {
-    if (e.target.closest('#pr-comments-collapse')) return;
-    toggle();
-  });
-
-  const rz = $('#pr-comments-resizer');
-  if (rz && panel) {
-    let dragging = false;
-    rz.addEventListener('mousedown', e => {
-      dragging = true;
-      rz.classList.add('drag');
-      panel.classList.remove('collapsed');
-      e.preventDefault();
-    });
-    addEventListener('mousemove', e => {
-      if (!dragging) return;
-      const bottom = panel.getBoundingClientRect().bottom;
-      const h = Math.max(80, Math.min(window.innerHeight * 0.8, bottom - e.clientY));
-      panel.style.height = h + 'px';
-      layout(); render();
-    });
-    addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      rz.classList.remove('drag');
-      layout(); render();
-    });
-  }
+  initCommentsPanel();
 
   $('#pr-comments-list')?.addEventListener('click', e => {
     const replyBtn = e.target.closest('.pr-issue-comment-reply-btn');
@@ -758,7 +683,7 @@ function reviewCommentCardHtml(c) {
 
 function draftCardHtml(c) {
   return '<div class="pr-comment-card draft">' +
-    '<div class="pr-issue-comment-head"><span class="pr-issue-comment-author">' + (bridgeOn() ? 'You (GitHub review draft, not yet posted)' : 'You (draft, not yet submitted)') + '</span></div>' +
+    '<div class="pr-issue-comment-head"><span class="pr-issue-comment-author">You (draft, not yet submitted)</span></div>' +
     '<div class="pr-issue-comment-body">' + esc(c.body) + '</div>' +
     '<div class="pr-comment-card-actions">' +
       '<button class="pr-comment-delete-btn" data-draft-id="' + c.id + '">Delete draft</button>' +
@@ -776,7 +701,7 @@ function threadHtml(path, t, key) {
   const replyRow = canReply
     ? '<div class="pr-comment-reply-row" data-reply-to="' + root.id + '">' +
       '<textarea class="pr-review-body reply-input" rows="1" spellcheck="false" autocomplete="off" placeholder="Reply..."></textarea>' +
-      '<button class="footer-btn reply-send">' + (bridgeOn() ? 'Reply on GitHub' : 'Reply') + '</button>' +
+      '<button class="footer-btn reply-send">Reply</button>' +
       '</div>'
     : '';
   const accKey = 'thread:' + key;
@@ -822,13 +747,13 @@ function renderCommentsPanel() {
   }
 
   const totalReview = reviewComments.length + comments.length;
-  let html = '<div class="pr-comments-section-title">Conversation' +
+  let html = '<div class="pr-comments-section-title">' + (bridgeOn() ? 'GitHub conversation' : 'Conversation') +
     (issueComments.length ? ' (' + issueComments.length + ')' : '') + '</div>';
   html += issueComments.length
     ? [...issueComments].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')).map(issueCommentCardHtml).join('')
     : '<div class="pr-comments-empty">No top-level comments yet.</div>';
 
-  html += '<div class="pr-comments-section-title">Review comments' +
+  html += '<div class="pr-comments-section-title">' + (bridgeOn() ? 'GitHub review comments' : 'Review comments') +
     (totalReview ? ' (' + totalReview + ')' : '') + '</div>';
   if (byPath.size === 0) {
     html += '<div class="pr-comments-empty">No inline comments yet.</div>';
