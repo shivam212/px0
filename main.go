@@ -47,6 +47,7 @@ func main() {
 		_            = flag.Bool("y", false, "answer yes to prompts (deprecated; PRs are always opened without prompt)")
 		_            = flag.Bool("yes", false, "answer yes to prompts (alias for -y)")
 		basePathFlag = flag.String("base-path", "", "base URL path prefix to serve endpoints and assets from (e.g. /rev-123/)")
+		bridgeFlag   = flag.String("bridge", "", "exchange comments and chat with an already running coding session through ~/.px0/bridge/<name>/{inbox,outbox}.jsonl; \"auto\" names it after the repo or PR")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "px0 %s - a code navigator\n\nusage:\n  px0 [flags] [file or directory]\n  px0 [flags] <pr-url>\n\nflags:\n", version)
@@ -156,6 +157,22 @@ func main() {
 
 	pxSrv := NewServer(ix, lsp, configuredBasePath)
 	pxSrv.tel = tel
+	var br *bridge
+	if *bridgeFlag != "" {
+		name := *bridgeFlag
+		if name == "auto" {
+			var pt *PRTarget
+			if isPR {
+				pt = &prTarget
+			}
+			name = defaultBridgeChannel(root, pt)
+		}
+		if br, err = newBridge(name); err != nil {
+			fatal(fmt.Errorf("-bridge: %w", err))
+		}
+		br.Start()
+		pxSrv.SetBridge(br)
+	}
 	if pr != nil {
 		pxSrv.SetPR(pr)
 	}
@@ -189,6 +206,13 @@ func main() {
 		for _, networkURL := range networkURLs(addr, initialFile, initialLine) {
 			uiKV("network", uiAccent(networkURL, os.Stdout), 11, os.Stdout)
 		}
+	}
+	if br != nil {
+		uiKV("bridge", br.channel, 11, os.Stdout)
+		uiKV("inbox", br.inbox, 11, os.Stdout)
+		uiKV("outbox", br.outbox, 11, os.Stdout)
+		uiHint("paste into your Claude Code session:", os.Stdout)
+		fmt.Fprintln(os.Stdout, br.Instruction())
 	}
 	uiHint("ctrl-c to stop", os.Stdout)
 
@@ -282,6 +306,7 @@ func main() {
 	}()
 
 	err = srv.Serve(ln)
+	br.Close()
 	lsp.Close()
 	agent.Close()
 	pxSrv.CloseThreads()

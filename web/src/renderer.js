@@ -73,6 +73,7 @@ export function paint() {
   let html = '';
   const gut = d.gutter || null;
   const agentRanges = (S.agentTargets || []).filter(t => t.path === d.path);
+  const bridgeLines = (S.bridgeLines || {})[d.path]; // bridge.js: line -> "pending" | "asked" | "answered"
   for (let i = first; i < last; i++) {
     const n = i + 1;
     const body = d.lines[i];
@@ -86,7 +87,9 @@ export function paint() {
       if (gut.dels.has(n)) rc += ' gut-del';
     }
     html += '<div class="' + rc + '" data-l="' + n + '">' +
-      '<div class="' + gc + '"><span class="line-btn" role="button" data-l="' + n + '" title="Thread and line actions">Edit</span>' + n + '</div><div class="c">' + (body === undefined ? '' : body) + '</div></div>';
+      '<div class="' + gc + '"><span class="line-btn" role="button" data-l="' + n + '" title="Thread and line actions">Edit</span>' +
+      (bridgeLines && bridgeLines[n] ? '<span class="br-dot br-dot-' + bridgeLines[n] + '" role="button" data-l="' + n + '" title="Comments for Claude on this line"></span>' : '') +
+      n + '</div><div class="c">' + (body === undefined ? '' : body) + '</div></div>';
   }
   const sel = saveSelection();
   rowsEl.style.transform = 'translateY(' + (first * LH) + 'px)';

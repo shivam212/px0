@@ -70,6 +70,9 @@ When hovering over code lines or diff lines:
   - **Start Thread**: Opens a conversation with the agent about the line.
 - Alternatively, select any range of lines and press **`Alt+R`** (or click **Comment** on the selection bar) to open the review comment composer.
 
+> [!TIP]
+> Started with `-bridge <name>`, the composer's main action is **Send to Claude**: the comment goes to your running Claude Code session and never to GitHub. **Add to GitHub Review** keeps the draft behaviour below. See [Claude Session Bridge](claude-bridge.md).
+
 ### 4. Batch Applying Comments Locally (`⚡ Batch Apply`)
 Drafted review comments appear in the PR top bar and inline across files:
 - **⚡ Batch Apply**: Lets you apply all drafted review comments across the entire pull request in one go using your configured coding agent harness. The agent reads your comments as instructions and modifies the code directly in the PR worktree.

@@ -26,6 +26,7 @@ import { initImageViewer } from './imageview.js';
 import { initGitStream } from './gitstream.js';
 import { initGitPanel } from './gitpanel.js';
 import { initPR } from './pr.js';
+import { initBridge } from './bridge.js';
 import { initLineComment } from './linecomment.js';
 import { initUnpushed, refreshUnpushed } from './unpushed.js';
 import { initPRScope } from './prscope.js';
@@ -92,6 +93,7 @@ initPRScope();
   updateSidebarToggleState();
   applyAgentMeta();
   initPR();
+  initBridge();
   showRightInspector(); // the right sidebar starts open, on Threads when there is a harness
   document.title = S.meta.name + ' - px0';
   $('#root-name').textContent = S.meta.name;

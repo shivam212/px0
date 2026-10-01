@@ -9,12 +9,15 @@
 import { $, S, doc_, esc, api, apiPostJson, keyLabel, withKeys } from './state.js';
 import { showToast } from './ui.js';
 import { setReviewHandler, SEL_MENU_ITEMS } from './selbar.js';
-import { diffview, setPRSyncHandler } from './diff.js';
+import { diffview, onDiffSync } from './diff.js';
 import { reloadWorkspace } from './agent.js';
 import { openFile } from './tabs.js';
 import { refreshTree } from './tree.js';
 import { layout, render } from './renderer.js';
 import { openSettings } from './settings.js';
+import { bridgeOn } from './bridge.js';
+import { initCommentsPanel } from './commentspanel.js';
+import { on } from './bus.js';
 
 let meta = null;      // this session's PR info: {number, title, base, head, writeAccess, readOnly}
 let comments = [];    // draft comments known to the server
@@ -32,10 +35,12 @@ export function initPR() {
   if (!SEL_MENU_ITEMS.some(item => item.sel === 'review-comment')) {
     SEL_MENU_ITEMS.push({ sel: 'review-comment', label: 'Add Review Comment', keys: 'Alt+R' });
   }
-  setReviewHandler(openCommentComposer);
-  setPRSyncHandler(renderMarkersForActiveDoc);
+  setReviewHandler(openCommentComposer); // bridge.js replaces it under -bridge
+  onDiffSync(renderMarkersForActiveDoc);
+  on('pr:drafts-changed', refreshComments); // bridge.js copied a comment into the GitHub drafts
   injectFooterButton();
   wireBarButtons();
+  if (bridgeOn()) tuckGitHubActions();
   wireCommentsPanel();
   renderBar();
   refreshComments();
@@ -138,6 +143,27 @@ function renderBar() {
   }
   const composeEl = $('#pr-issue-compose');
   if (composeEl) composeEl.hidden = false;
+}
+
+// Under -bridge a comment goes to Claude, so the GitHub verdict row (summary,
+// Submit / Request Changes / Approve) stays folded behind one "GitHub ▾" button.
+function tuckGitHubActions() {
+  const row = $('.pr-review-row');
+  const head = $('#pr-bar .pr-bar-row');
+  if (!row || !head || $('#pr-github-menu')) return;
+  row.hidden = true;
+  const btn = document.createElement('button');
+  btn.id = 'pr-github-menu';
+  btn.className = 'footer-btn pr-github-menu';
+  btn.title = 'Review on GitHub: post your GitHub drafts, approve, or request changes';
+  btn.textContent = 'GitHub ▾';
+  btn.addEventListener('click', () => {
+    row.hidden = !row.hidden;
+    btn.classList.toggle('active', !row.hidden);
+    if (!row.hidden) $('#pr-review-body')?.focus();
+    layout(); render();
+  });
+  head.append(btn);
 }
 
 export function nudgeGitHubToken() {
@@ -260,6 +286,12 @@ async function submitReview(event) {
   if (event === 'REQUEST_CHANGES' && !body && !comments.length) {
     showToast('!', 'Add a comment or review body before requesting changes');
     return;
+  }
+  if (bridgeOn()) {
+    const n = comments.length;
+    const what = event === 'APPROVE' ? 'an approving review' : event === 'REQUEST_CHANGES' ? 'a changes-requested review' : 'a review';
+    if (!confirm('Publish ' + what + ' on GitHub PR #' + meta.number + ' with ' + n + ' GitHub draft' + (n === 1 ? '' : 's') +
+      '?\n\nEveryone on the PR will see it, and a submitted review cannot be deleted. Comments for Claude are not included.')) return;
   }
   try {
     await apiPostJson('/api/pr/submit', { event, body });
@@ -523,50 +555,7 @@ function toggleAccordion(item) {
 }
 
 function wireCommentsPanel() {
-  const panel = $('#pr-comments-panel');
-  if (panel) {
-    panel.hidden = false;
-    panel.classList.add('collapsed');
-  }
-
-  const toggle = () => {
-    panel?.classList.toggle('collapsed');
-    layout(); render();
-  };
-
-  $('#pr-comments-collapse')?.addEventListener('click', e => {
-    e.stopPropagation();
-    toggle();
-  });
-
-  $('.pr-comments-panel-head')?.addEventListener('click', e => {
-    if (e.target.closest('#pr-comments-collapse')) return;
-    toggle();
-  });
-
-  const rz = $('#pr-comments-resizer');
-  if (rz && panel) {
-    let dragging = false;
-    rz.addEventListener('mousedown', e => {
-      dragging = true;
-      rz.classList.add('drag');
-      panel.classList.remove('collapsed');
-      e.preventDefault();
-    });
-    addEventListener('mousemove', e => {
-      if (!dragging) return;
-      const bottom = panel.getBoundingClientRect().bottom;
-      const h = Math.max(80, Math.min(window.innerHeight * 0.8, bottom - e.clientY));
-      panel.style.height = h + 'px';
-      layout(); render();
-    });
-    addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      rz.classList.remove('drag');
-      layout(); render();
-    });
-  }
+  initCommentsPanel();
 
   $('#pr-comments-list')?.addEventListener('click', e => {
     const replyBtn = e.target.closest('.pr-issue-comment-reply-btn');
@@ -758,13 +747,13 @@ function renderCommentsPanel() {
   }
 
   const totalReview = reviewComments.length + comments.length;
-  let html = '<div class="pr-comments-section-title">Conversation' +
+  let html = '<div class="pr-comments-section-title">' + (bridgeOn() ? 'GitHub conversation' : 'Conversation') +
     (issueComments.length ? ' (' + issueComments.length + ')' : '') + '</div>';
   html += issueComments.length
     ? [...issueComments].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')).map(issueCommentCardHtml).join('')
     : '<div class="pr-comments-empty">No top-level comments yet.</div>';
 
-  html += '<div class="pr-comments-section-title">Review comments' +
+  html += '<div class="pr-comments-section-title">' + (bridgeOn() ? 'GitHub review comments' : 'Review comments') +
     (totalReview ? ' (' + totalReview + ')' : '') + '</div>';
   if (byPath.size === 0) {
     html += '<div class="pr-comments-empty">No inline comments yet.</div>';

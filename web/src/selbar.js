@@ -375,6 +375,10 @@ export function runSelectionAction(act, triggerBtn = null, override = null) {
   } else if (act === 'thread') {
     if (!threadHandler) return false;
     threadHandler(target);
+  } else if (act === 'agent-group') {
+    const r = (targetBtn || bar())?.getBoundingClientRect();
+    pinnedInfo = target;
+    openSelMenu(r ? r.left : 40, r ? r.top : 40, item => AGENT_ITEMS.has(item.sel), true);
   } else if (act === 'review-comment') {
     if (!reviewHandler) return false;
     reviewHandler(target);
@@ -401,7 +405,27 @@ export function closeSelMenu() {
 export function openLineMenu(info, x, y) {
   closeSelMenu();
   pinnedInfo = info;
-  openSelMenu(x, y, item => item.sel !== 'usages' && item.sel !== 'copy-preview-text' && (item.sel !== 'review-comment' || !!info.fromDiff));
+  openSelMenu(x, y, item => item.sel !== 'usages' && item.sel !== 'copy-preview-text' && (item.sel !== 'review-comment' || !!info.fromDiff || reviewAnywhere));
+}
+
+/* Under -bridge (bridge.js): a comment can go on any line, not only a diff
+   line GitHub knows about, and the coding-harness actions (a new agent
+   process, not the Claude session) fold into one "Agent ▸" entry. */
+let reviewAnywhere = false;
+let agentGrouped = false;
+const AGENT_ITEMS = new Set(['thread', 'agent-edit']);
+export function setReviewAnywhere(on) { reviewAnywhere = on; }
+export function groupAgentActions() {
+  agentGrouped = true;
+  const sel = bar();
+  if (!sel || sel.querySelector('[data-sel="agent-group"]')) return;
+  for (const b of sel.querySelectorAll('[data-sel="thread"], [data-sel="agent-edit"]')) b.remove();
+  const btn = document.createElement('button');
+  btn.className = 'footer-btn';
+  btn.dataset.sel = 'agent-group';
+  btn.title = 'Start an agent thread or edit inline with a coding harness';
+  btn.innerHTML = '<span class="footer-btn-label">Agent ▾</span>';
+  sel.append(btn);
 }
 
 // Exported so pr.js can append "Add Review Comment" in a PR review session
@@ -417,16 +441,23 @@ export const SEL_MENU_ITEMS = [
   { sel: 'usages', label: 'Find Usages', keys: 'Alt+U', forCode: true },
 ];
 
-/* Built from the selection actions each time, keeping Find Usages in context menu. */
-function openSelMenu(x, y, keep = (item) => true) {
+/* Built from the selection actions each time, keeping Find Usages in context menu.
+   agentOnly is the "Agent ▸" submenu; otherwise grouped harness actions collapse into it. */
+function openSelMenu(x, y, keep = (item) => true, agentOnly = false) {
   const d = doc_();
   const info = pinnedInfo || current;
   const isPreview = !!(info && info.isMarkdownPreview);
   const isMdDoc = !!(d && d.markdown);
 
   menu.replaceChildren();
-  for (const item of SEL_MENU_ITEMS) {
+  let groupShown = false;
+  for (let item of SEL_MENU_ITEMS) {
     if (!keep(item)) continue;
+    if (agentGrouped && !agentOnly && AGENT_ITEMS.has(item.sel)) {
+      if (groupShown) continue;
+      groupShown = true;
+      item = { sel: 'agent-group', label: 'Agent ▸' };
+    }
     if (isPreview && item.forCode) continue;
     if (!isPreview && item.forPreview) continue;
     if (item.forMarkdown && !isMdDoc && !isPreview) continue;

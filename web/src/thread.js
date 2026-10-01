@@ -130,7 +130,7 @@ function thrInline(src) {
   return s;
 }
 
-function thrMd(src) {
+export function thrMd(src) {
   if (!src) return '';
   const lines = src.replace(/\r\n?/g, '\n').split('\n');
   let html = '';

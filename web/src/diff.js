@@ -48,7 +48,7 @@ export function syncDiffView(force = false) {
     shown = want;
     diffview.hidden = !want;
     if (want) drawDiff(want, force);
-    else { diffContent.replaceChildren(); if (prSyncHandler) prSyncHandler(); }
+    else { diffContent.replaceChildren(); syncListeners.forEach(fn => fn()); }
   } else if (want) {
     /* Same doc still on screen. A caller that dropped the cached diff -- the
        tab being pointed at a different commit, say -- leaves the view showing
@@ -168,7 +168,7 @@ function renderDiff(d) {
       'this commit only, not the working tree', (bodyEl) => appendHunks(bodyEl, hunks, d.diffMode, false)));
     diffContent.append(frag);
     syncDiffAgentTargets();
-    if (prSyncHandler) prSyncHandler();
+    syncListeners.forEach(fn => fn());
     return;
   }
   if (S.meta?.pr && d.prDiffHunks !== undefined) {
@@ -213,7 +213,7 @@ function renderDiff(d) {
   }
   diffContent.append(frag);
   syncDiffAgentTargets();
-  if (prSyncHandler) prSyncHandler();
+  syncListeners.forEach(fn => fn());
 }
 
 /* Points a tab's diff at the section the sidebar scope is showing. A section
@@ -270,7 +270,7 @@ function createDiffSection(d, kind, title, sub, populateBody) {
   head.addEventListener('click', () => {
     sec.classList.toggle('collapsed');
     d[collapsedKey] = sec.classList.contains('collapsed');
-    if (prSyncHandler) prSyncHandler();
+    syncListeners.forEach(fn => fn());
   });
 
   sec.append(head, body);
@@ -284,11 +284,11 @@ function sectionNote(text) {
   return el;
 }
 
-/* One-way registration for pr.js, mirroring agent.js's hook into selbar.js:
-   diff.js never imports pr.js, it just calls this after every repaint when a
-   PR review session has set it. */
-let prSyncHandler = null;
-export function setPRSyncHandler(fn) { prSyncHandler = fn; }
+/* One-way registration for pr.js and bridge.js, mirroring agent.js's hook into
+   selbar.js: diff.js never imports them, it calls each listener after every
+   repaint so they can redraw what they pin to diff rows. */
+const syncListeners = [];
+export function onDiffSync(fn) { syncListeners.push(fn); }
 
 /* Same one-way registration for tabs.js: diff.js knows how to leave diff mode
    but not how to move the caret and scroll the (already open) source view to

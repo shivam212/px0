@@ -592,22 +592,29 @@ func (s *Server) handlePRComments(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, "path, line, and body are required")
 			return
 		}
-		side := strings.ToUpper(body.Side)
-		if side != "LEFT" {
-			side = "RIGHT"
-		}
-		p.mu.Lock()
-		p.nextID++
-		c := prComment{ID: p.nextID, Path: body.Path, Line: body.Line, Side: side, Body: strings.TrimSpace(body.Body)}
-		p.comments = append(p.comments, c)
-		if s.session != nil {
-			s.session.Update(func(ws *WorkspaceSession) { ws.Drafts = p.comments })
-		}
-		p.mu.Unlock()
-		writeJSON(w, c)
+		writeJSON(w, s.addPRDraft(body.Path, body.Line, body.Side, body.Body))
 	default:
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// addPRDraft appends a GitHub review draft and saves the list to the session
+// file. It stays local until the review is submitted.
+func (s *Server) addPRDraft(path string, line int, side, body string) prComment {
+	side = strings.ToUpper(side)
+	if side != "LEFT" {
+		side = "RIGHT"
+	}
+	p := s.pr
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextID++
+	c := prComment{ID: p.nextID, Path: path, Line: line, Side: side, Body: strings.TrimSpace(body)}
+	p.comments = append(p.comments, c)
+	if s.session != nil {
+		s.session.Update(func(ws *WorkspaceSession) { ws.Drafts = p.comments })
+	}
+	return c
 }
 
 func (s *Server) handlePRCommentDelete(w http.ResponseWriter, r *http.Request) {

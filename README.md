@@ -20,6 +20,7 @@ See full performance benchmarks and comparisons at [px0.ai/benchmarks](https://p
 ## Features
 
 - GitHub PR reviews & Git panel: Review pull requests directly (`px0 <pr-url>`), inspect scoped merge-base diffs, draft inline review comments, and stage, commit, or push from the browser.
+- Claude session bridge: `-bridge <name>` sends comments and chat to a Claude Code session already running in your terminal, and shows its replies, without posting anything to GitHub.
 - Unpushed commit review: Read the commits your branch is ahead of its tracking branch by, one file diff at a time, before you push them.
 - AI coding harness integration: Dispatch edits directly to Claude Code, Gemini CLI, Cursor Agent, Antigravity, OpenCode, Codex, Aider, or Goose with live reloading.
 - Fast navigation: Fuzzy file search, symbol outline, and workspace regex search in milliseconds.
@@ -68,7 +69,20 @@ px0 -host 0.0.0.0 -port 7777 ~/workspace
 
 # Behind a reverse proxy under a subpath
 px0 -base-path /rev-123/ -host 0.0.0.0 -port 7777 ~/workspace
+
+# Talk to a Claude Code session you already have open (comments stay local)
+px0 -bridge review https://github.com/owner/repo/pull/123
 ```
+
+`-bridge <name>` (or `-bridge auto`, named after the repo or PR) connects
+px0 to an already running Claude Code session through
+`~/.px0/bridge/<name>/inbox.jsonl` and `outbox.jsonl`. px0 prints both paths
+and an instruction to paste into the session. After that, a comment
+(`Alt+R` on any line) waits as Pending under its line, **Ask Claude** sends
+all pending comments to that session as one batch, and Claude's replies
+appear under each comment, where **Reply…** continues the thread. Chat lives
+in the bottom Comments panel. Nothing sent this way is posted to GitHub; the
+GitHub review actions sit behind **GitHub ▾**. See [Claude Session Bridge](docs/features/claude-bridge.md).
 
 When px0 binds to `0.0.0.0`, it prints a `network` URL for every unique
 non-loopback IPv4 address on the machine, using the port selected by the
