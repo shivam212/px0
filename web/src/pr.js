@@ -15,7 +15,8 @@ import { openFile } from './tabs.js';
 import { refreshTree } from './tree.js';
 import { layout, render } from './renderer.js';
 import { openSettings } from './settings.js';
-import { bridgeOn, sendToBridge, openBridge } from './bridge.js';
+import { bridgeOn, sendToBridge, addBridgeDraft, markBridgeDiff, openBridge } from './bridge.js';
+import { on } from './bus.js';
 
 let meta = null;      // this session's PR info: {number, title, base, head, writeAccess, readOnly}
 let comments = [];    // draft comments known to the server
@@ -36,6 +37,7 @@ export function initPR() {
   if (bridgeOn()) labelGitHubActions();
   setReviewHandler(openCommentComposer);
   setPRSyncHandler(renderMarkersForActiveDoc);
+  on('bridge:drafts', renderMarkersForActiveDoc);
   injectFooterButton();
   wireBarButtons();
   wireCommentsPanel();
@@ -418,11 +420,12 @@ export function openCommentComposer(info) {
     '<span class="agent-ref" role="button" tabindex="0" title="Jump to this line">' + esc(ref) + '</span>' +
     '<span class="grow"></span><button class="agent-close" title="Close (Esc)">✕</button></div>' +
     '<div class="agent-compose">' +
-    '<textarea class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Note or question for Claude... (' + esc(modEnter) + ' to send; stays on this machine)"></textarea>' +
+    '<textarea class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Note or question for Claude... (' + esc(modEnter) + ' adds a draft; stays on this machine)"></textarea>' +
     '<div class="agent-err" hidden></div>' +
     '<div class="agent-foot"><button class="agent-now pr-to-github" title="Add as a GitHub review draft instead. It is published only when you post the review.">Add to GitHub Review</button>' +
     '<span class="grow"></span>' +
-    '<button class="agent-send" title="Send to your Claude Code session, never to GitHub (' + esc(modEnter) + ')">Send to Claude</button></div></div>'
+    '<button class="agent-now pr-claude-now" title="Send just this comment to Claude now, without the drafts">Send Now</button>' +
+    '<button class="agent-send" title="Add to the Claude drafts, sent together from the Claude tab; never to GitHub (' + esc(modEnter) + ')">Add Claude Draft</button></div></div>'
     : '<div class="agent-head"><span class="sel-chip">Review Comment</span>' +
     '<span class="agent-ref" role="button" tabindex="0" title="Jump to this line">' + esc(ref) + '</span>' +
     '<span class="grow"></span><button class="agent-close" title="Close (Esc)">✕</button></div>' +
@@ -453,17 +456,18 @@ export function openCommentComposer(info) {
   };
   box.querySelector('.agent-close')?.addEventListener('click', close);
 
-  const sendClaude = async () => {
+  const sendClaude = async (now = false) => {
     if (!ta) return;
     const text = ta.value.trim();
     if (!text) return;
     const errEl = /** @type {HTMLElement|null} */ (box.querySelector('.agent-err'));
     if (errEl) errEl.hidden = true;
+    const msg = { text, path: info.path, l1: line, l2: lineEnd, side, snippet: info.text };
     try {
-      await sendToBridge({ text, path: info.path, l1: line, l2: lineEnd, side, snippet: info.text });
+      if (now) await sendToBridge(msg); else await addBridgeDraft(msg);
       close();
-      showToast('✓', 'Sent to Claude (not posted to GitHub)');
-      openBridge(null);
+      showToast('✓', now ? 'Sent to Claude (not posted to GitHub)' : 'Added a Claude draft (send them from the Claude tab)');
+      if (now) openBridge(null);
     } catch (e) {
       if (errEl) {
         errEl.hidden = false;
@@ -493,7 +497,8 @@ export function openCommentComposer(info) {
       }
     }
   };
-  const primary = toClaude ? sendClaude : send;
+  const primary = toClaude ? () => sendClaude(false) : send;
+  box.querySelector('.pr-claude-now')?.addEventListener('click', () => sendClaude(true));
   box.querySelector('.agent-send')?.addEventListener('click', primary);
   box.querySelector('.pr-to-github')?.addEventListener('click', send);
   ta?.addEventListener('keydown', (/** @type {KeyboardEvent} */ e) => {
@@ -560,6 +565,7 @@ function renderMarkersForActiveDoc() {
     });
     el.querySelector('.diff-code')?.before(badge);
   }
+  markBridgeDiff();
 }
 
 /* ---------- bottom panel: existing comments + drafts, always open ---------- */

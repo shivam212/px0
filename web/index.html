@@ -528,11 +528,22 @@
         <span class="inspector-sym-title" id="br-channel"></span>
       </div>
       <div id="br-msgs" class="thr-msgs"></div>
+      <!-- Unsent drafts, kept in the session file; sent together as one "review" line -->
+      <div id="br-drafts" class="br-drafts" hidden>
+        <div class="br-drafts-head"><span id="br-drafts-count"></span><span class="grow"></span><span class="agent-hint">not sent yet</span></div>
+        <div id="br-drafts-list" class="br-drafts-list"></div>
+        <textarea id="br-review-note" class="agent-input" rows="2" spellcheck="false" autocomplete="off" placeholder="Overall note for this batch (optional)..."></textarea>
+        <div class="agent-foot">
+          <span class="grow"></span>
+          <button id="br-review-send" class="agent-send" title="Send every draft and the note to Claude as one message">Send drafts to Claude</button>
+        </div>
+      </div>
       <div class="thr-compose">
         <div id="br-anchor" class="thr-anchor" hidden></div>
         <textarea id="br-input" class="agent-input" rows="3" spellcheck="false" autocomplete="off" placeholder="Message your Claude Code session (local only, never posted to GitHub)..."></textarea>
         <div class="agent-foot">
           <span class="agent-hint">Enter to send, Shift+Enter for a new line</span>
+          <button id="br-send-now" class="agent-now" title="Send this one comment to Claude right away, without the drafts" hidden>Send Now</button>
           <button id="br-send" class="agent-send" title="Send to the Claude Code session">Send to Claude</button>
         </div>
       </div>

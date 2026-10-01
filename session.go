@@ -30,6 +30,9 @@ type WorkspaceSession struct {
 	Active   int          `json:"active"`
 	OpenDirs []string     `json:"openDirs"`
 	Drafts   []prComment  `json:"drafts,omitempty"`
+	// BridgeDrafts are -bridge comments not yet sent to the Claude session
+	// (bridge.go). Kept apart from Drafts, which are GitHub review drafts.
+	BridgeDrafts []bridgeComment `json:"bridgeDrafts,omitempty"`
 }
 
 // sessionFilePath returns the path to the JSON file where workspace session state is saved.

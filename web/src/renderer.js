@@ -73,6 +73,7 @@ export function paint() {
   let html = '';
   const gut = d.gutter || null;
   const agentRanges = (S.agentTargets || []).filter(t => t.path === d.path);
+  const bridgeDrafts = (S.bridgeDrafts || []).filter(t => t.path === d.path && t.side !== 'LEFT'); // bridge.js
   for (let i = first; i < last; i++) {
     const n = i + 1;
     const body = d.lines[i];
@@ -80,6 +81,7 @@ export function paint() {
     if (n === d.cur) rc += ' cur';
     if (agentRanges.some(r => n >= r.l1 && n <= r.l2)) rc += ' agent-sel';
     if (agentRanges.some(r => n === r.l1)) rc += ' agent-anchor';
+    if (bridgeDrafts.some(r => n >= r.line && n <= (r.end_line || r.line))) rc += ' br-draft';
     if (gut) {
       const m = gut.marks.get(n);
       if (m) gc += m === 'add' ? ' gut-add' : ' gut-mod';

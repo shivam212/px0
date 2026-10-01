@@ -79,7 +79,8 @@ px0 to an already running Claude Code session through
 `~/.px0/bridge/<name>/inbox.jsonl` and `outbox.jsonl`. px0 prints both paths
 and an instruction to paste into the session. After that, comments
 (`Alt+K`, or **Send to Claude** in a PR review) and messages from the
-**Claude** pane go to that session, and its replies appear under them. Nothing
+**Claude** pane go to that session (comments collect as drafts and go as one
+batch, or one at a time with Send Now), and its replies appear under them. Nothing
 sent this way is posted to GitHub. Posting to GitHub is a separate button
 labelled "on GitHub". See [Claude Session Bridge](docs/features/claude-bridge.md).
 

@@ -182,6 +182,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/pr/comments/review-reply"), s.handlePRReviewCommentReply)
 	s.mux.HandleFunc(s.routePath("/api/bridge"), s.handleBridge)
 	s.mux.HandleFunc(s.routePath("/api/bridge/send"), s.handleBridgeSend)
+	s.mux.HandleFunc(s.routePath("/api/bridge/drafts"), s.handleBridgeDrafts)
+	s.mux.HandleFunc(s.routePath("/api/bridge/review"), s.handleBridgeReview)
 	s.mux.HandleFunc(s.routePath("/api/session"), s.handleSession)
 }
 
@@ -532,6 +534,12 @@ func (s *Server) prThreadContext(scope string) string {
 // become live. Unset (nil) for a normal workspace.
 func (s *Server) SetPR(p *prSession) {
 	s.pr = p
+	// A PR checkout lives in a new temp dir each run, so a session keyed by
+	// that path never comes back. Under -bridge, key it by the PR instead so
+	// unsent drafts survive a restart.
+	if p != nil && s.bridge != nil && s.BasePath() == "/" {
+		s.session = newSessionManager("/", fmt.Sprintf("pr:%s/%s/%s#%d", p.target.Provider, p.target.Owner, p.target.Repo, p.target.Number))
+	}
 	if s.threads != nil {
 		s.threads.prContext = s.prThreadContext
 	}

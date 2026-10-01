@@ -33,7 +33,7 @@ import (
 type bridgeMsg struct {
 	ID      string `json:"id"`
 	TS      string `json:"ts"`
-	Kind    string `json:"kind"` // "comment" (anchored to code) or "chat"
+	Kind    string `json:"kind"` // "comment" (anchored to code), "chat", or "review" (a batch of comments)
 	Text    string `json:"text"`
 	Repo    string `json:"repo,omitempty"`
 	PR      int    `json:"pr,omitempty"`
@@ -42,6 +42,21 @@ type bridgeMsg struct {
 	EndLine int    `json:"end_line,omitempty"`
 	Side    string `json:"side,omitempty"` // PR diffs: "RIGHT" (new code) or "LEFT" (base)
 	Commit  string `json:"commit,omitempty"`
+	Snippet string `json:"snippet,omitempty"`
+
+	Comments []bridgeComment `json:"comments,omitempty"` // kind "review" only
+}
+
+// bridgeComment is one code comment: a draft waiting in the session file, or
+// one entry of a "review" message once the drafts are sent together. Its id
+// stays the same from draft to sent, so Claude can reply to it directly.
+type bridgeComment struct {
+	ID      string `json:"id"`
+	Path    string `json:"path"`
+	Line    int    `json:"line"`
+	EndLine int    `json:"end_line,omitempty"`
+	Side    string `json:"side,omitempty"`
+	Text    string `json:"text"`
 	Snippet string `json:"snippet,omitempty"`
 }
 
@@ -168,7 +183,11 @@ func bridgeID(prefix string) string {
 // Send stamps m with an id and time and appends it to the inbox as one line in
 // one write on an O_APPEND descriptor, so a reader never sees half a message.
 func (b *bridge) Send(m bridgeMsg) (bridgeMsg, error) {
-	m.ID = bridgeID("m-")
+	prefix := "m-"
+	if m.Kind == "review" {
+		prefix = "rv-"
+	}
+	m.ID = bridgeID(prefix)
 	m.TS = time.Now().UTC().Format(time.RFC3339)
 	line, err := json.Marshal(m)
 	if err != nil {
@@ -320,30 +339,45 @@ func (s *Server) handleBridge(w http.ResponseWriter, r *http.Request) {
 		"outbox":   s.bridge.outbox,
 		"messages": threads,
 		"loose":    loose,
+		"drafts":   s.bridgeDrafts(),
 	})
 }
 
 type bridgeThread struct {
 	bridgeMsg
-	Replies []bridgeReply `json:"replies"`
+	Replies        []bridgeReply            `json:"replies"`         // reply_to = this message's id
+	CommentReplies map[string][]bridgeReply `json:"comment_replies"` // review only: reply_to = one comment's id
 }
 
-// threadBridgeReplies puts each reply under the message its reply_to names.
-// Replies with no reply_to, or one naming a message this channel doesn't
-// have, come back separately as loose, in arrival order.
+// threadBridgeReplies puts each reply under what its reply_to names: a whole
+// message (comment, chat, or review), or one comment inside a review.
+// Replies with no reply_to, or one naming nothing on this channel, come back
+// separately as loose, in arrival order.
 func threadBridgeReplies(sent []bridgeMsg, replies []bridgeReply) ([]bridgeThread, []bridgeReply) {
+	type ref struct {
+		msg     int
+		comment string // "" for the message itself
+	}
 	threads := make([]bridgeThread, len(sent))
-	byID := make(map[string]int, len(sent))
+	byID := make(map[string]ref, len(sent))
 	for i, m := range sent {
-		threads[i] = bridgeThread{bridgeMsg: m, Replies: []bridgeReply{}}
-		byID[m.ID] = i
+		threads[i] = bridgeThread{bridgeMsg: m, Replies: []bridgeReply{}, CommentReplies: map[string][]bridgeReply{}}
+		byID[m.ID] = ref{msg: i}
+		for _, c := range m.Comments {
+			byID[c.ID] = ref{msg: i, comment: c.ID}
+		}
 	}
 	loose := []bridgeReply{}
 	for _, r := range replies {
-		if i, ok := byID[r.ReplyTo]; ok {
-			threads[i].Replies = append(threads[i].Replies, r)
-		} else {
+		at, ok := byID[r.ReplyTo]
+		switch {
+		case !ok:
 			loose = append(loose, r)
+		case at.comment == "":
+			threads[at.msg].Replies = append(threads[at.msg].Replies, r)
+		default:
+			t := &threads[at.msg]
+			t.CommentReplies[at.comment] = append(t.CommentReplies[at.comment], r)
 		}
 	}
 	return threads, loose
@@ -381,19 +415,12 @@ func (s *Server) handleBridgeSend(w http.ResponseWriter, r *http.Request) {
 	switch m.Kind {
 	case "chat":
 	case "comment":
-		_, rel, ok := s.safePath(body.Path)
-		if !ok || rel == "" || body.Line <= 0 {
+		c, ok := s.bridgeAnchor(body.Path, body.Line, body.EndLine, body.Side, body.Snippet)
+		if !ok {
 			fail(w, http.StatusBadRequest, "a comment needs a path and line")
 			return
 		}
-		m.Path, m.Line = filepath.ToSlash(rel), body.Line
-		if body.EndLine > body.Line {
-			m.EndLine = body.EndLine
-		}
-		if side := strings.ToUpper(body.Side); side == "LEFT" || side == "RIGHT" {
-			m.Side = side
-		}
-		m.Snippet = s.bridgeSnippet(m, body.Snippet)
+		m.Path, m.Line, m.EndLine, m.Side, m.Snippet = c.Path, c.Line, c.EndLine, c.Side, c.Snippet
 	default:
 		fail(w, http.StatusBadRequest, `kind must be "comment" or "chat"`)
 		return
@@ -404,6 +431,155 @@ func (s *Server) handleBridgeSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	writeJSON(w, sent)
+}
+
+// bridgeAnchor validates where a comment points and reads the code around it.
+func (s *Server) bridgeAnchor(path string, line, endLine int, side, clientSnippet string) (bridgeComment, bool) {
+	_, rel, ok := s.safePath(path)
+	if !ok || rel == "" || line <= 0 {
+		return bridgeComment{}, false
+	}
+	c := bridgeComment{Path: filepath.ToSlash(rel), Line: line}
+	if endLine > line {
+		c.EndLine = endLine
+	}
+	if sd := strings.ToUpper(side); sd == "LEFT" || sd == "RIGHT" {
+		c.Side = sd
+	}
+	c.Snippet = s.bridgeSnippet(c, clientSnippet)
+	return c, true
+}
+
+func (s *Server) bridgeDrafts() []bridgeComment {
+	d := s.session.Get().BridgeDrafts
+	if d == nil {
+		return []bridgeComment{}
+	}
+	return d
+}
+
+// handleBridgeDrafts edits the draft list kept in the session file. The body's
+// op picks what happens: "add" (path, line, endLine, side, text, snippet),
+// "update" (id, text) or "delete" (id). It returns the new list.
+func (s *Server) handleBridgeDrafts(w http.ResponseWriter, r *http.Request) {
+	if !s.bridgeOrFail(w) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, map[string]any{"drafts": s.bridgeDrafts()})
+		return
+	}
+	if !localPost(w, r) {
+		return
+	}
+	var body struct {
+		Op      string `json:"op"`
+		ID      string `json:"id"`
+		Path    string `json:"path"`
+		Line    int    `json:"line"`
+		EndLine int    `json:"endLine"`
+		Side    string `json:"side"`
+		Text    string `json:"text"`
+		Snippet string `json:"snippet"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<17)).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	text := strings.TrimSpace(body.Text)
+	var c bridgeComment
+	switch body.Op {
+	case "add":
+		var ok bool
+		if c, ok = s.bridgeAnchor(body.Path, body.Line, body.EndLine, body.Side, body.Snippet); !ok || text == "" {
+			fail(w, http.StatusBadRequest, "a draft needs a path, line and text")
+			return
+		}
+		c.ID, c.Text = bridgeID("c-"), text
+	case "update":
+		if text == "" {
+			fail(w, http.StatusBadRequest, "text is required")
+			return
+		}
+	case "delete":
+	default:
+		fail(w, http.StatusBadRequest, `op must be "add", "update" or "delete"`)
+		return
+	}
+	found := body.Op == "add"
+	ws := s.session.Update(func(ws *WorkspaceSession) {
+		switch body.Op {
+		case "add":
+			ws.BridgeDrafts = append(ws.BridgeDrafts, c)
+		case "update":
+			for i := range ws.BridgeDrafts {
+				if ws.BridgeDrafts[i].ID == body.ID {
+					ws.BridgeDrafts[i].Text, found = text, true
+				}
+			}
+		case "delete":
+			for i, d := range ws.BridgeDrafts {
+				if d.ID == body.ID {
+					ws.BridgeDrafts, found = append(ws.BridgeDrafts[:i:i], ws.BridgeDrafts[i+1:]...), true
+					break
+				}
+			}
+		}
+	})
+	if !found {
+		fail(w, http.StatusNotFound, "no such draft")
+		return
+	}
+	drafts := ws.BridgeDrafts
+	if drafts == nil {
+		drafts = []bridgeComment{}
+	}
+	writeJSON(w, map[string]any{"drafts": drafts, "draft": c})
+}
+
+// handleBridgeReview sends every draft, plus an optional overall note, as one
+// "review" line, so the session is woken once for the whole batch rather
+// than once per comment. The drafts are cleared only after the line is written.
+func (s *Server) handleBridgeReview(w http.ResponseWriter, r *http.Request) {
+	if !s.bridgeOrFail(w) {
+		return
+	}
+	if !localPost(w, r) {
+		return
+	}
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<17)).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	drafts := s.bridgeDrafts()
+	if len(drafts) == 0 {
+		fail(w, http.StatusBadRequest, "no drafts to send")
+		return
+	}
+	m := bridgeMsg{Kind: "review", Text: strings.TrimSpace(body.Text), Comments: drafts}
+	s.bridgeOrigin(&m)
+	sent, err := s.bridge.Send(m)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sentIDs := make(map[string]bool, len(drafts))
+	for _, d := range drafts {
+		sentIDs[d.ID] = true
+	}
+	s.session.Update(func(ws *WorkspaceSession) {
+		kept := ws.BridgeDrafts[:0:0]
+		for _, d := range ws.BridgeDrafts {
+			if !sentIDs[d.ID] { // added while this request ran
+				kept = append(kept, d)
+			}
+		}
+		ws.BridgeDrafts = kept
+	})
 	writeJSON(w, sent)
 }
 
@@ -430,7 +606,7 @@ const bridgeSnippetMax = 40
 // bridgeSnippet returns the commented lines plus a few either side, numbered,
 // from the working tree. The base side of a PR diff is not on disk, so there
 // the client's copy of the selected lines is used instead.
-func (s *Server) bridgeSnippet(m bridgeMsg, client string) string {
+func (s *Server) bridgeSnippet(m bridgeComment, client string) string {
 	if m.Side == "LEFT" {
 		return truncateLines(client, bridgeSnippetMax)
 	}

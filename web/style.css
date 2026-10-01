@@ -2859,3 +2859,10 @@ body.hide-git-gutter .g-git, body.hide-git-gutter [class*="git-"] { display: non
 #br-anchor { display: flex; align-items: center; gap: 6px; padding: 0; }
 #br-anchor[hidden] { display: none; }
 #br-channel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.br-draft .g, .br-draft .diff-ln-nav { box-shadow: inset 3px 0 0 var(--accent); }
+.br-drafts { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); max-height: 45%; overflow-y: auto; }
+.br-drafts[hidden] { display: none; }
+.br-drafts-head { display: flex; align-items: center; gap: 6px; font: 600 10px/1 var(--ui); letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.br-drafts-list { display: flex; flex-direction: column; gap: 6px; }
+.br-draft-item { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border: 1px dashed var(--line); border-radius: var(--r-lg); }
+.br-comment { display: flex; flex-direction: column; gap: 4px; padding-left: 10px; border-left: 2px solid var(--line); }

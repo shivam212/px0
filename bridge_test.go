@@ -298,6 +298,7 @@ func (f failTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestBridgeCommentsNeverCallGitHub(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	prev := githubHTTPClient.Transport
 	githubHTTPClient.Transport = failTransport{t}
 	t.Cleanup(func() { githubHTTPClient.Transport = prev })
@@ -323,12 +324,144 @@ func TestBridgeCommentsNeverCallGitHub(t *testing.T) {
 	if code, m := bridgePost(t, s, "/api/pr/comments", map[string]any{"path": "main.go", "line": 4, "side": "RIGHT", "body": "draft"}); code != http.StatusOK {
 		t.Fatalf("draft = %d %v", code, m)
 	}
+	if code, m := bridgePost(t, s, "/api/bridge/drafts", map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "batched"}); code != http.StatusOK {
+		t.Fatalf("bridge draft = %d %v", code, m)
+	}
+	if code, m := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "all of it"}); code != http.StatusOK {
+		t.Fatalf("bridge review = %d %v", code, m)
+	}
 	if len(prov.calls) != 0 {
 		t.Fatalf("forge calls: %v", prov.calls)
 	}
 
 	lines := readJSONLines(t, b.inbox)
-	if len(lines) != 2 || lines[0]["repo"] != "o/r" || lines[0]["pr"] != float64(9) || lines[0]["commit"] != "abc123" {
+	if len(lines) != 3 || lines[2]["kind"] != "review" || lines[0]["repo"] != "o/r" || lines[0]["pr"] != float64(9) || lines[0]["commit"] != "abc123" {
 		t.Fatalf("inbox = %v", lines)
+	}
+}
+
+func draftOp(t *testing.T, s *Server, body map[string]any) map[string]any {
+	t.Helper()
+	code, m := bridgePost(t, s, "/api/bridge/drafts", body)
+	if code != http.StatusOK {
+		t.Fatalf("drafts %v = %d %v", body["op"], code, m)
+	}
+	return m
+}
+
+func TestBridgeReviewSendsOneLine(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	s, _ := newTestServer(t)
+	b := newTestBridge(t, "review")
+	s.SetBridge(b)
+
+	if code, _ := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "x"}); code != http.StatusBadRequest {
+		t.Fatalf("review with no drafts = %d, want 400", code)
+	}
+	d1 := draftOp(t, s, map[string]any{"op": "add", "path": "greet.go", "line": 5, "endLine": 6, "side": "RIGHT", "text": "first"})["draft"].(map[string]any)
+	d2 := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "second"})["draft"].(map[string]any)
+	d3 := draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 1, "text": "dropped"})["draft"].(map[string]any)
+	draftOp(t, s, map[string]any{"op": "update", "id": d2["id"], "text": "second, edited"})
+	if left := draftOp(t, s, map[string]any{"op": "delete", "id": d3["id"]})["drafts"].([]any); len(left) != 2 {
+		t.Fatalf("after delete, %d drafts", len(left))
+	}
+	if code, _ := bridgePost(t, s, "/api/bridge/drafts", map[string]any{"op": "update", "id": "c-nope", "text": "x"}); code != http.StatusNotFound {
+		t.Fatalf("update of a missing draft = %d, want 404", code)
+	}
+	if n := len(readJSONLines(t, b.inbox)); n != 0 {
+		t.Fatalf("drafts reached the inbox before sending: %d lines", n)
+	}
+
+	code, sent := bridgePost(t, s, "/api/bridge/review", map[string]any{"text": "overall: looks close"})
+	if code != http.StatusOK {
+		t.Fatalf("review = %d %v", code, sent)
+	}
+	lines := readJSONLines(t, b.inbox)
+	if len(lines) != 1 {
+		t.Fatalf("review wrote %d lines, want 1", len(lines))
+	}
+	rv := lines[0]
+	if rv["kind"] != "review" || rv["text"] != "overall: looks close" || rv["id"] != sent["id"] || !strings.HasPrefix(rv["id"].(string), "rv-") || rv["ts"] == "" || rv["repo"] == "" {
+		t.Fatalf("review line = %v", rv)
+	}
+	if _, ok := rv["path"]; ok {
+		t.Fatalf("review line carries a top-level path: %v", rv)
+	}
+	cs := rv["comments"].([]any)
+	if len(cs) != 2 {
+		t.Fatalf("comments = %v", cs)
+	}
+	c1, c2 := cs[0].(map[string]any), cs[1].(map[string]any)
+	if c1["id"] != d1["id"] || c1["path"] != "greet.go" || c1["line"] != float64(5) || c1["end_line"] != float64(6) || c1["side"] != "RIGHT" || c1["text"] != "first" {
+		t.Fatalf("comment 1 = %v", c1)
+	}
+	if snip, _ := c1["snippet"].(string); !strings.Contains(snip, "6: \tfmt.Println(s)") {
+		t.Fatalf("comment 1 snippet = %q", snip)
+	}
+	if c2["id"] != d2["id"] || c2["text"] != "second, edited" {
+		t.Fatalf("comment 2 = %v", c2)
+	}
+	if _, view := get(t, s, "/api/bridge"); len(view["drafts"].([]any)) != 0 {
+		t.Fatalf("drafts not cleared after sending: %v", view["drafts"])
+	}
+}
+
+func TestBridgeReviewReplyThreading(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	s, _ := newTestServer(t)
+	b := newTestBridge(t, "rthread")
+	s.SetBridge(b)
+	draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "a"})
+	c2 := draftOp(t, s, map[string]any{"op": "add", "path": "greet.go", "line": 6, "text": "b"})["draft"].(map[string]any)
+	_, rv := bridgePost(t, s, "/api/bridge/review", map[string]any{})
+
+	appendFile(t, b.outbox, `{"reply_to":"`+rv["id"].(string)+`","text":"combined answer"}`+"\n")
+	appendFile(t, b.outbox, `{"reply_to":"`+c2["id"].(string)+`","text":"about b"}`+"\n")
+	b.poll()
+
+	_, view := get(t, s, "/api/bridge")
+	msgs := view["messages"].([]any)
+	if len(msgs) != 1 || len(view["loose"].([]any)) != 0 {
+		t.Fatalf("messages=%v loose=%v", msgs, view["loose"])
+	}
+	m := msgs[0].(map[string]any)
+	if r := m["replies"].([]any); len(r) != 1 || r[0].(map[string]any)["text"] != "combined answer" {
+		t.Fatalf("review-level replies = %v", r)
+	}
+	per := m["comment_replies"].(map[string]any)
+	if r, _ := per[c2["id"].(string)].([]any); len(r) != 1 || r[0].(map[string]any)["text"] != "about b" || len(per) != 1 {
+		t.Fatalf("comment-level replies = %v", per)
+	}
+}
+
+func TestBridgeDraftsPersist(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	s, root := newTestServer(t)
+	s.SetBridge(newTestBridge(t, "persist"))
+	draftOp(t, s, map[string]any{"op": "add", "path": "main.go", "line": 4, "text": "keep me"})
+
+	// A restarted process on the same workspace reads them back.
+	ix := NewIndex(root)
+	ix.Build()
+	again := NewServer(ix, nil)
+	again.SetBridge(s.bridge)
+	if _, view := get(t, again, "/api/bridge"); len(view["drafts"].([]any)) != 1 {
+		t.Fatalf("drafts after restart = %v", view["drafts"])
+	}
+
+	// A PR review checks out into a new temp dir each run; its session is keyed
+	// by the PR, so drafts come back there too.
+	target := PRTarget{Provider: "github", Owner: "o", Repo: "r", Number: 5}
+	pr1, _ := newTestServer(t)
+	pr1.SetBridge(s.bridge)
+	pr1.SetPR(&prSession{target: target, meta: PRMeta{Number: 5}, diffBase: "HEAD"})
+	draftOp(t, pr1, map[string]any{"op": "add", "path": "greet.go", "line": 6, "text": "pr note"})
+
+	pr2, _ := newTestServer(t) // different root, same PR
+	pr2.SetBridge(s.bridge)
+	pr2.SetPR(&prSession{target: target, meta: PRMeta{Number: 5}, diffBase: "HEAD"})
+	_, view := get(t, pr2, "/api/bridge")
+	if d := view["drafts"].([]any); len(d) != 1 || d[0].(map[string]any)["text"] != "pr note" {
+		t.Fatalf("PR drafts after restart = %v", view["drafts"])
 	}
 }

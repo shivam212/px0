@@ -157,17 +157,6 @@ func main() {
 
 	pxSrv := NewServer(ix, lsp, configuredBasePath)
 	pxSrv.tel = tel
-	if pr != nil {
-		pxSrv.SetPR(pr)
-	}
-	var agent *agentManager
-	if !*noAgent {
-		agent, err = newAgentManager(root, *agentCmd, lsp)
-		if err != nil {
-			fatal(fmt.Errorf("-agent: %w", err))
-		}
-		pxSrv.SetAgent(agent)
-	}
 	var br *bridge
 	if *bridgeFlag != "" {
 		name := *bridgeFlag
@@ -183,6 +172,17 @@ func main() {
 		}
 		br.Start()
 		pxSrv.SetBridge(br)
+	}
+	if pr != nil {
+		pxSrv.SetPR(pr)
+	}
+	var agent *agentManager
+	if !*noAgent {
+		agent, err = newAgentManager(root, *agentCmd, lsp)
+		if err != nil {
+			fatal(fmt.Errorf("-agent: %w", err))
+		}
+		pxSrv.SetAgent(agent)
 	}
 	initDur := time.Since(tInit)
 

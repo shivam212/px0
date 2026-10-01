@@ -30,8 +30,9 @@ The files live under `$XDG_CONFIG_HOME/px0/bridge/` when that is set, otherwise 
 ## Using it
 
 - **Claude pane**: a **Claude** tab in the right sidebar lists everything sent on the channel. Each message has Claude's replies under it, and a "waiting for a reply" note until the first one arrives. Typing in the box at the bottom sends a free-form `chat` message.
-- **Send to Claude** (`Alt+K`, the selection bar, or the right-click and gutter menus): attaches the selected lines to the pane's composer. The message is sent as a `comment` with the path, line range and a snippet of the code around it.
-- **PR review**: the `Alt+R` comment composer's main button is **Send to Claude** (`Mod+Enter`). **Add to GitHub Review** is a separate button that keeps the old draft behaviour. Every button that publishes says so (**Post Review to GitHub**, **Approve on GitHub**, **Post to GitHub**, **Reply on GitHub**). Posting a review first asks you to confirm, and the dialog says how many drafts it will publish.
+- **Comment for Claude** (`Alt+K`, the selection bar, or the right-click and gutter menus): attaches the selected lines to the pane's composer. **Add Draft** (Enter) saves it as a draft. **Send Now** (`Mod+Enter`) sends that one comment by itself as a `comment` line.
+- **Drafts**: unsent comments are listed above the composer, where you can edit or delete them, and their lines are marked in the editor and diff gutters. They are saved in the workspace session file, so they survive a restart. In a PR review under `-bridge`, that session file is keyed by the PR rather than its temp checkout. **Send N drafts to Claude** sends all of them, plus an optional overall note, as **one** `review` line. One line wakes the Claude session once for the whole batch.
+- **PR review**: the `Alt+R` comment composer's main button is **Add Claude Draft** (`Mod+Enter`), with **Send Now** next to it. **Add to GitHub Review** is a separate button that keeps the GitHub draft behaviour; those drafts stay separate from Claude drafts. Every button that publishes says so (**Post Review to GitHub**, **Approve on GitHub**, **Post to GitHub**, **Reply on GitHub**). Posting a review first asks you to confirm, and the dialog says how many drafts it will publish.
 
 ## File format
 
@@ -42,12 +43,23 @@ Inbox (px0 → Claude):
 | Field | When | Meaning |
 | :--- | :--- | :--- |
 | `id`, `ts` | always | message id (`m-…`) and RFC 3339 UTC time |
-| `kind` | always | `comment` (anchored to code) or `chat` |
+| `kind` | always | `comment` (one comment, sent now), `chat`, or `review` (a batch of drafts) |
 | `text` | always | what you wrote |
 | `repo` | always | `owner/repo` in a PR review, else the workspace directory name |
 | `pr` | PR review | PR number |
 | `path`, `line`, `end_line`, `side` | `comment` | workspace-relative path, line range, and `RIGHT`/`LEFT` on a PR diff |
 | `commit` | when known | PR head SHA, or the workspace's `HEAD` |
 | `snippet` | `comment` | the lines with up to 3 lines of context, numbered (`12: code`) |
+| `comments` | `review` | the drafts: `[{id, path, line, end_line, side, text, snippet}]`; `text` is then the overall note (may be `""`) |
 
-Outbox (Claude → px0): `{"reply_to": "<message id>", "text": "<markdown>"}`. `id` and `ts` are optional and px0 fills them in. A reply whose `reply_to` doesn't match a message is shown on its own in the timeline. px0 reads the outbox every 400 ms. It holds back a line that has no newline yet, and if the file is truncated it reads it again from the start.
+A `review` line looks like this:
+
+```json
+{"id":"rv-75104f176d2e","ts":"2026-10-01T10:34:54Z","kind":"review","text":"Overall: check the startup order","repo":"px0","commit":"74bc838",
+ "comments":[{"id":"c-5537bd5216f7","path":"bridge.go","line":170,"text":"Why this prefix?","snippet":"167: ...\n170: ..."},
+             {"id":"c-850674f99dae","path":"main.go","line":171,"end_line":172,"text":"Order matters here?","snippet":"168: ..."}]}
+```
+
+(Shown wrapped here. On disk it is a single line.)
+
+Outbox (Claude → px0): `{"reply_to": "<id>", "text": "<markdown>"}`, where the id is a message's id, or for a review either the review's `rv-…` id (one answer to the whole batch) or a single comment's `c-…` id (an answer to that comment). Both are shown threaded. `id` and `ts` are optional and px0 fills them in. A reply whose `reply_to` doesn't match a message is shown on its own in the timeline. px0 reads the outbox every 400 ms. It holds back a line that has no newline yet, and if the file is truncated it reads it again from the start.
